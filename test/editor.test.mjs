@@ -121,6 +121,7 @@ test('literal search is case-sensitive, CJK aware, wraps, and respects graphemes
   assert.deepEqual(b.search('plan'), { found: true, wrapped: true }); assert.deepEqual(at(b), [0, 5]);
   assert.deepEqual(b.search('plan', false), { found: true, wrapped: true }); assert.deepEqual(at(b), [2, 0]);
   b.search('計畫', false); assert.deepEqual(at(b), [1, 2]);
+  assert.deepEqual(b.search('plan\n計畫'), { found: false, wrapped: false });
   assert.deepEqual(b.search('Missing'), { found: false, wrapped: false }); assert.deepEqual(at(b), [1, 2]);
   const d = new DocumentBuffer('cafe\u0301 e'); d.col = 0;
   d.search('e'); assert.deepEqual(at(d), [0, 5], 'never stops inside a combining sequence');
@@ -177,7 +178,10 @@ test('narrow command line keeps the typed tail visible', async () => fixture(asy
   assert.ok(performance.now() - start < 300, 'long prompt renders in linear time');
   assert.ok(plain(wide.find(line => line.includes(tui.CURSOR_MARKER))).includes('尾'));
   assert.ok(wide.every(line => tui.visibleWidth(line) <= 30));
-  for (const width of [4, 5, 6]) assert.ok(pane.render(width).every(line => tui.visibleWidth(line) <= width));
+  for (const width of [4, 5, 6, 7]) {
+    const lines = pane.render(width); assert.ok(lines.every(line => tui.visibleWidth(line) <= width));
+    if (width > 4) assert.ok(plain(lines.find(line => line.includes(tui.CURSOR_MARKER))).includes('尾'), `tail visible at width ${width}`);
+  }
 }));
 test('unsupported operator sequences are cancelled instead of running the motion', async () => fixture(async ({ document }) => {
   document.buffer.replace('alpha beta'); document.buffer.col = 0;
@@ -189,8 +193,9 @@ test('unsupported operator sequences are cancelled instead of running the motion
 test('Ctrl+C in Normal Mode cancels a pending operator before pi sees it', async () => fixture(async ({ document }) => {
   const pane = new DocumentPane(document, () => theme, () => 24, () => {}, () => true, () => {});
   const before = document.buffer.text;
-  pane.handleInput('d'); assert.equal(pane.interrupt(), false); pane.handleInput('d');
+  pane.handleInput('d'); assert.equal(pane.interrupt(), true, 'only the operator is cancelled'); pane.handleInput('d');
   assert.equal(document.buffer.text, before);
+  pane.handleInput('d'); pane.interrupt(); assert.equal(pane.interrupt(), false, 'a second Ctrl+C reaches pi');
 }));
 test('Ctrl+C leaves Insert Mode without touching text; w/e/b move visual selection', async () => fixture(async ({ document }) => {
   const pane = new DocumentPane(document, () => theme, () => 24, () => {}, () => true, () => {});

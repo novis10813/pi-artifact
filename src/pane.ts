@@ -27,11 +27,12 @@ export class DocumentPane implements Component, Focusable {
   constructor(readonly document: DocumentSession, private theme: () => Theme,
     private height: () => number, private redraw: () => void, private save: () => Promise<boolean> | boolean | void,
     private focus: () => void, private hide: () => void = () => {}) {}
-  /** Ctrl+C: cancel the command line or leave Insert Mode. Returns false when it is not ours. */
+  /** Ctrl+C: cancel the command line, leave Insert Mode, or cancel a pending operator. Returns false when it is not ours. */
   interrupt(): boolean {
     if (this.prompt) this.prompt = undefined;
     else if (this.document.buffer.mode === "insert") this.document.buffer.normal();
-    else { this.pending = ""; return false; }
+    else if (this.pending) this.pending = "";
+    else return false;
     this.redraw(); return true;
   }
   private run(kind: ":" | "/", text: string): void {
@@ -116,7 +117,9 @@ export class DocumentPane implements Component, Focusable {
       const room = Math.max(0, width - 3), cells = graphemes(safe(this.prompt.kind + this.prompt.text));
       let fitted = cells.join("");
       if (visibleWidth(fitted) > room) {
-        const head = cells[0] + "…";
+        // Drop the prompt kind before the newest text when the pane is very narrow.
+        const last = visibleWidth(cells.at(-1)!);
+        const head = visibleWidth(cells[0] + "…") + last <= room ? cells[0] + "…" : visibleWidth("…") + last <= room ? "…" : "";
         let budget = room - visibleWidth(head), i = cells.length;
         while (i > 1 && budget >= visibleWidth(cells[i - 1])) budget -= visibleWidth(cells[--i]);
         fitted = head + cells.slice(i).join("");

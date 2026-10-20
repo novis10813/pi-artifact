@@ -31,11 +31,10 @@ export default function installPane(pi: ExtensionAPI, changed?: (ctx: ExtensionC
       try { await target.save(withFileMutationQueue); }
       catch (error) { report(error); return false; }
       // The file is written. Status and plan-sync failures are reported but do not turn this into a failed save.
-      try {
-        targetView?.message("Saved · F6 chat / document");
-        context?.ui.setStatus("plan-pane", "plan");
-        if (context) await changed?.(context);
-      } catch (error) { report(error); }
+      try { targetView?.message("Saved · F6 chat / document"); context?.ui.setStatus("plan-pane", "plan"); }
+      catch (error) { report(error); }
+      try { if (context) await changed?.(context); }
+      catch (error) { report(error); }
       return true;
     } finally { saving = false; }
   };
