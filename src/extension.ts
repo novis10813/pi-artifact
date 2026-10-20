@@ -21,10 +21,8 @@ export default function (pi: ExtensionAPI): void {
     }
     return { store: store!, plan: plan! };
   };
-  const status = (ctx: ExtensionContext) => {
-    if (plan?.active) ctx.ui.setStatus("plan-mode", `PLAN ${plan.state.phase} ${plan.state.revision?.slice(0, 8) ?? "locked"}`);
-    else ctx.ui.setStatus("plan-mode", undefined);
-  };
+  // The plan phase is shown in the pane's bottom-right corner, not in the global footer.
+  const status = (_ctx: ExtensionContext) => pane.repaint();
   const loadout = () => {
     if (!plan?.active) return;
     const previous = plan.state.previousTools ?? pi.getActiveTools();
@@ -32,7 +30,7 @@ export default function (pi: ExtensionAPI): void {
   };
   const pane = installPane(pi, async ctx => {
     if (plan?.active) { await plan.sync(); loadout(); status(ctx); }
-  });
+  }, () => plan?.active ? `PLAN ${plan.state.phase}` : "");
   const restore = async (_event: unknown, ctx: ExtensionContext) => {
     const p = ensure(ctx);
     const branch = ctx.sessionManager.getBranch();

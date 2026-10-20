@@ -31,7 +31,8 @@ export class SplitView {
   private pane?: DocumentPane;
   readonly factory: EditorFactory;
 
-  constructor(private ctx: ExtensionContext, readonly document: DocumentSession, save: () => Promise<boolean>) {
+  constructor(private ctx: ExtensionContext, readonly document: DocumentSession, save: () => Promise<boolean>,
+    hide: () => void = () => {}, label: () => string = () => "") {
     const owner = this;
     this.factory = (surface, theme, keys) => {
       if (!isViewportTUI(surface)) throw new Error("Plan pane requires fullscreen mode.");
@@ -39,11 +40,13 @@ export class SplitView {
       if (!original) throw new Error("This pi version does not expose a compatible fullscreen root.");
       this.tui = surface; this.original = original;
       this.pane = new DocumentPane(document, () => this.ctx.ui.theme,
-        () => Math.max(4, surface.terminal.rows), () => surface.requestRender(), save, () => this.focusPlan());
+        () => Math.max(4, surface.terminal.rows), () => surface.requestRender(), save, () => this.focusPlan(), hide, label);
       this.editor = new class extends CustomEditor {
         handleInput(data: string): void {
           if (matchesKey(data, "f6")) { owner.right = !owner.right; surface.requestRender(); return; }
           if (owner.right) {
+            // The pane consumes plain keys, so only the F7 toggle reaches extension shortcuts.
+            if (matchesKey(data, "f7") && this.onExtensionShortcut?.(data)) return;
             // Ctrl+C leaves Insert Mode or the command line first. Otherwise app
             // clear/exit/suspend still work. Esc belongs to document modal editing.
             if (keys.matches(data, "app.clear") && owner.pane!.interrupt()) return;
@@ -91,6 +94,7 @@ export class SplitView {
     if (!this.attached || !this.editor?.focused || this.tui!.hasOverlay()) return;
     this.right = true; this.tui!.setFocus(this.editor!); this.tui!.requestRender();
   }
+  repaint(): void { this.tui?.requestRender(); }
   message(text: string): void {
     if (this.pane) { this.pane.message = text; this.tui?.requestRender(); }
   }

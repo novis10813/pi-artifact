@@ -6,7 +6,7 @@ import { DocumentSession } from "./document.ts";
 import { SplitView } from "./split.ts";
 
 /** Owns only the document pane. Lifecycle and permission state live in extension.ts. */
-export default function installPane(pi: ExtensionAPI, changed?: (ctx: ExtensionContext) => Promise<void>) {
+export default function installPane(pi: ExtensionAPI, changed?: (ctx: ExtensionContext) => Promise<void>, label: () => string = () => "") {
   let document: DocumentSession | undefined;
   let view: SplitView | undefined;
   let context: ExtensionContext | undefined;
@@ -14,6 +14,8 @@ export default function installPane(pi: ExtensionAPI, changed?: (ctx: ExtensionC
   let refreshing = false;
   let saving = false;
   let lastError = "";
+  // Hidden keeps the document session (draft, cursor) without the split layout.
+  let hidden = false;
   const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
   const stop = () => { if (timer) clearInterval(timer); timer = undefined; };
   const detach = () => { stop(); view?.unmount(); view = undefined; context?.ui.setStatus("plan-pane", undefined); };
@@ -66,21 +68,33 @@ export default function installPane(pi: ExtensionAPI, changed?: (ctx: ExtensionC
     if (!document) throw new Error("Open a Markdown file first: /plan-pane open <path.md>");
     if (ctx.mode !== "tui") throw new Error("Plan pane requires interactive fullscreen mode.");
     if (view?.attached) { if (focus) view.focusPlan(); return; }
-    detach(); context = ctx;
-    const next = new SplitView(ctx, document, save);
+    detach(); context = ctx; hidden = false;
+    const next = new SplitView(ctx, document, save, () => hide(ctx), label);
     next.mount(); view = next;
     ctx.ui.setStatus("plan-pane", `plan${document.dirty ? "*" : ""}`);
     timer = setInterval(() => { void refresh(); }, 500); timer.unref?.();
   };
+  /** Collapse to full-width chat. Never saves, discards, or changes Plan Mode state. */
+  const hide = (ctx: ExtensionContext) => {
+    if (!document) throw new Error("No document open.");
+    detach(); hidden = true;
+    ctx.ui.setStatus("plan-pane", `plan hidden${document.dirty ? "*" : ""}`);
+    ctx.ui.notify(`Plan pane hidden${document.dirty ? " · unsaved draft kept" : ""} · F7 or /plan-pane toggle to show`, "info");
+  };
+  const toggle = (ctx: ExtensionContext) => {
+    if (saving || refreshing) throw new Error("Document I/O in progress. Try again shortly.");
+    if (view?.attached) hide(ctx); else show(ctx, false);
+  };
   const open = async (path: string, ctx: ExtensionContext) => {
     if (saving || refreshing) throw new Error("Document I/O in progress. Try again shortly.");
-    if (document?.path === path) { show(ctx, false); return; }
+    // Model updates to the same document must not re-open a pane the user hid.
+    if (document?.path === path) { if (!hidden) show(ctx, false); return; }
     if (document?.dirty) throw new Error("Unsaved draft. Save, copy, or discard it first.");
     const next = await DocumentSession.open(path);
     detach(); document = next; show(ctx);
   };
   pi.registerCommand("plan-pane", {
-    description: "Split Markdown editor: open <path.md>, show, save, copy <new.md>, close, discard",
+    description: "Split Markdown editor: open <path.md>, show, toggle, save, copy <new.md>, close, discard",
     handler: async (args, ctx) => {
       const match = args.trim().match(/^(\S+)(?:\s+([\s\S]+))?$/);
       const action = match?.[1] ?? "show", path = match?.[2];
@@ -93,6 +107,7 @@ export default function installPane(pi: ExtensionAPI, changed?: (ctx: ExtensionC
           const next = await DocumentSession.open(resolve(ctx.cwd, path));
           detach(); document = next; show(ctx);
         } else if (action === "show") show(ctx);
+        else if (action === "toggle") toggle(ctx);
         else if (action === "save") { if (!document) throw new Error("No document open."); await save(); }
         else if (action === "copy") {
           if (!path || !document) throw new Error("Usage: /plan-pane copy <new-path.md>");
@@ -100,10 +115,14 @@ export default function installPane(pi: ExtensionAPI, changed?: (ctx: ExtensionC
           ctx.ui.notify(`Draft copy saved: ${target}`, "info");
         } else if (action === "close" || action === "discard") {
           if (document?.dirty && action !== "discard") throw new Error("Unsaved draft. Save/copy it, or explicitly use /plan-pane discard.");
-          detach(); document = undefined;
-        } else throw new Error("Usage: /plan-pane open <path.md> | show | save | copy <new.md> | close | discard");
+          detach(); document = undefined; hidden = false;
+        } else throw new Error("Usage: /plan-pane open <path.md> | show | toggle | save | copy <new.md> | close | discard");
       } catch (error) { ctx.ui.notify(errorText(error), "error"); }
     },
+  });
+  pi.registerShortcut?.("f7", {
+    description: "Show or hide the plan pane",
+    handler: ctx => { try { toggle(ctx); } catch (error) { ctx.ui.notify(errorText(error), "error"); } },
   });
   // Session navigation must not abandon a dirty workspace draft or associate it
   // with a different branch. /reload and shutdown use a private recovery copy.
@@ -134,7 +153,9 @@ export default function installPane(pi: ExtensionAPI, changed?: (ctx: ExtensionC
     }
     detach(); document = undefined;
   });
-  return { open, show, save, refresh,
+  return { open, show, hide, toggle, save, refresh,
+    repaint() { view?.repaint(); },
+    get hidden() { return hidden; },
     get document() { return document; },
     get busy() { return saving || refreshing; },
     get dirty() { return document?.dirty ?? false; },

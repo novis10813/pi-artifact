@@ -26,7 +26,7 @@ export class DocumentPane implements Component, Focusable {
 
   constructor(readonly document: DocumentSession, private theme: () => Theme,
     private height: () => number, private redraw: () => void, private save: () => Promise<boolean> | boolean | void,
-    private focus: () => void, private hide: () => void = () => {}) {}
+    private focus: () => void, private hide: () => void = () => {}, private label: () => string = () => "") {}
   /** Ctrl+C: cancel the command line, leave Insert Mode, or cancel a pending operator. Returns false when it is not ours. */
   interrupt(): boolean {
     if (this.prompt) this.prompt = undefined;
@@ -95,8 +95,9 @@ export class DocumentPane implements Component, Focusable {
       const fitted = truncateToWidth(text, width - 2, "");
       return border("│") + fitted + " ".repeat(Math.max(0, width - 2 - visibleWidth(fitted))) + border("│");
     };
-    const title = ` ${safe(basename(this.document.path))}${this.document.dirty ? " [+]" : ""} `;
-    const top = truncateToWidth(title, width - 2, "");
+    // Narrow panes truncate the file name first; the unsaved marker stays visible.
+    const dirty = this.document.dirty ? " [+] " : " ";
+    const top = truncateToWidth(" " + truncateToWidth(safe(basename(this.document.path)), Math.max(0, width - 4 - visibleWidth(dirty)), "…") + dirty, width - 2, "");
     const output = [border("┌" + top + "─".repeat(Math.max(0, width - 2 - visibleWidth(top))) + "┐")];
     for (let i = 0; i < this.bodyHeight; i++) {
       const line = this.visual[this.top + i];
@@ -130,8 +131,10 @@ export class DocumentPane implements Component, Focusable {
       const status = `${b.mode.toUpperCase()} ${b.row + 1}:${b.col + 1}${this.document.conflict ? " CONFLICT" : ""} · ${this.message}`;
       output.push(frame(theme.fg(this.document.conflict ? "warning" : "muted", safe(status))));
     }
-    const hint = truncateToWidth(" F6 focus ", width - 2, "");
-    output.push(border("└" + hint + "─".repeat(Math.max(0, width - 2 - visibleWidth(hint))) + "┘"));
+    // Bottom border: key hints on the left, plan phase on the right. The phase wins when narrow.
+    const label = safe(this.label()), right = truncateToWidth(label ? ` ${label} ` : "", width - 2, "");
+    const hint = " F6 focus · F7 hide ", left = visibleWidth(hint) + visibleWidth(right) <= width - 2 ? hint : "";
+    output.push(border("└" + left + "─".repeat(Math.max(0, width - 2 - visibleWidth(left) - visibleWidth(right))) + right + "┘"));
     return output;
   }
   handleInput(data: string): void {

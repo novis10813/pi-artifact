@@ -86,8 +86,15 @@ with tempfile.TemporaryDirectory(prefix="pi-artifact-pty-") as directory:
         os.write(master, b":w\r")
         pump(0.8)
         assert plan.read_text().startswith("新增中文 # Plan"), "Right-pane editing or save failed"
-        # Chat input must not modify the plan or be submitted to a model.
-        os.write(master, b"\x1b[17~chat stays left")
+        # F7 from the focused document hides the pane through pi's shortcut dispatch; F7 from chat reshows it.
+        start = len(output)
+        os.write(master, b"\x1b[18~")
+        expect(b"Plan pane hidden", start=start)
+        start = len(output)
+        os.write(master, b"\x1b[18~")
+        expect(b"F7 hide", start=start)
+        # Reshown with chat focus. Chat input must not modify the plan or be submitted to a model.
+        os.write(master, b"chat stays left")
         pump(0.5)
         assert "chat stays left" not in plan.read_text()
         # Return to the document and navigate to its end after an actual SIGWINCH.

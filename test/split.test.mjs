@@ -154,6 +154,61 @@ test('save reports concurrent saves and keeps a written file successful when pla
   assert.ok(f.notices.at(-1).type === 'error'); assert.equal(pane.dirty, true, 'failed write keeps the draft');
   await rm(f.path, { recursive: true });
 }));
+test('F7 and /plan-pane toggle hide and reshow the pane without saving, discarding or moving the cursor', async () => fixture(async f => {
+  const commands = new Map(), shortcuts = new Map(), events = new Map();
+  const pane = extension({ registerCommand: (n, spec) => commands.set(n, spec), registerShortcut: (k, spec) => shortcuts.set(k, spec), on: (n, h) => events.set(n, h) });
+  assert.deepEqual([...shortcuts.keys()], ['f7']);
+  // pi forwards extension shortcuts to custom editors through onExtensionShortcut.
+  const bind = () => { f.editor().onExtensionShortcut = data => data === '\x1b[18~' ? (shortcuts.get('f7').handler(f.ctx), true) : false; };
+  await pane.open(f.path, f.ctx); bind();
+  f.editor().handleInput('chat');
+  f.editor().handleInput('\x1b[17~'); f.editor().handleInput('j'); f.editor().handleInput('i'); f.editor().handleInput('X');
+  const text = pane.document.buffer.text, cursor = [pane.document.buffer.row, pane.document.buffer.col];
+  f.editor().handleInput('\x1b[18~');
+  assert.equal(pane.hidden, true); assert.equal(f.active().layoutRoot, f.original, 'full-width chat');
+  assert.equal(f.ctx.ui.getEditorComponent(), undefined); assert.equal(f.editor().getText(), 'chat');
+  assert.equal(f.statuses.get('plan-pane'), 'plan hidden*'); assert.match(f.notices.at(-1).text, /hidden · unsaved draft kept · F7/);
+  assert.equal(pane.dirty, true); assert.notEqual(await readFile(f.path, 'utf8'), text, 'hiding never saves');
+  await pane.open(f.path, f.ctx); assert.equal(pane.hidden, true, 'model updates do not re-open a hidden pane');
+  shortcuts.get('f7').handler(f.ctx);
+  assert.equal(pane.hidden, false); assert.notEqual(f.active().layoutRoot, f.original);
+  f.terminal.columns = 160; f.terminal.rows = 30;
+  const rect = renderLayoutFrame(f.active().layoutRoot, 160, 30, () => {}).root.children[1].rect;
+  assert.deepEqual([rect.x, rect.width], [80, 80], 'reshown 50/50');
+  assert.equal(pane.document.buffer.text, text); assert.deepEqual([pane.document.buffer.row, pane.document.buffer.col], cursor);
+  assert.equal(pane.document.buffer.mode, 'insert'); assert.equal(f.editor().getText(), 'chat');
+  await commands.get('plan-pane').handler('toggle', f.ctx); assert.equal(pane.hidden, true);
+  await commands.get('plan-pane').handler('toggle', f.ctx); assert.equal(pane.hidden, false);
+  await events.get('session_shutdown')({ reason: 'quit' }, f.ctx);
+}));
+test(':wq hides the pane only after a successful save', async () => fixture(async f => {
+  const pane = extension({ registerCommand() {}, on() {} });
+  await pane.open(f.path, f.ctx);
+  f.editor().handleInput('\x1b[17~'); f.editor().handleInput('i'); f.editor().handleInput('Y'); f.editor().handleInput('\x1b');
+  for (const key of ':wq\r') f.editor().handleInput(key);
+  await new Promise(r => setTimeout(r, 50));
+  assert.ok((await readFile(f.path, 'utf8')).startsWith('Y# Plan')); assert.equal(pane.hidden, true);
+  assert.equal(f.active().layoutRoot, f.original);
+  pane.show(f.ctx, false); await rm(f.path); await import('node:fs/promises').then(fs => fs.mkdir(f.path));
+  f.editor().handleInput('\x1b[17~'); f.editor().handleInput('i'); f.editor().handleInput('Z'); f.editor().handleInput('\x1b');
+  for (const key of ':wq\r') f.editor().handleInput(key);
+  await new Promise(r => setTimeout(r, 50));
+  assert.equal(pane.hidden, false, 'failed save keeps the pane open'); assert.equal(pane.dirty, true);
+  await rm(f.path, { recursive: true });
+}));
+test('pane shows the plan phase bottom-right and keeps phase and dirty marker when narrow', async () => fixture(async f => {
+  let phase = 'PLAN planning';
+  const pane = extension({ registerCommand() {}, on() {} }, undefined, () => phase);
+  await pane.open(f.path, f.ctx);
+  const bottom = width => { f.terminal.columns = width * 2; f.terminal.rows = 20; return tui.stripTerminalSequences(renderLayoutFrame(f.active().layoutRoot, width * 2, 20, () => {}).lines.at(-1)); };
+  assert.match(bottom(60), /F6 focus · F7 hide ─+ PLAN planning ┘$/);
+  phase = 'PLAN review'; pane.repaint(); assert.match(bottom(60), / PLAN review ┘$/);
+  const narrow = bottom(24); assert.match(narrow, / PLAN review ┘$/); assert.ok(!narrow.includes('F6'));
+  f.editor().handleInput('\x1b[17~'); f.editor().handleInput('i'); f.editor().handleInput('x');
+  f.terminal.columns = 30; const top = tui.stripTerminalSequences(renderLayoutFrame(f.active().layoutRoot, 30, 20, () => {}).lines[0]);
+  assert.ok(top.includes('[+]'), top);
+  assert.ok(!f.statuses.has('plan-mode'));
+}));
 test('programmatic reopen of the same artifact preserves chat input focus', async () => fixture(async f => {
   const events = new Map();
   const pane = extension({ registerCommand() {}, on: (name, handler) => events.set(name, handler) });
