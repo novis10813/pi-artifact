@@ -21,7 +21,7 @@ test('approve grants execution for the exact revision in one step; review is opt
   assert.equal(plan.state.phase, 'executing'); assert.equal(plan.state.approval.revision, a.revision);
   assert.equal(await plan.block('write', {}), undefined);
   await assert.rejects(plan.approve(a.revision), /已在實作/); await assert.rejects(plan.submit(), /實作進行中/);
-  plan.finish(); assert.ok(await plan.block('write', {})); await assert.rejects(plan.approve(a.revision), /沒有可核准/);
+  plan.finish(); assert.ok(await plan.block('write', {})); await assert.rejects(plan.approve(a.revision), /計畫已完成/); await assert.rejects(plan.submit(), /計畫已完成/);
   assert.deepEqual(plan.off(), ['read', 'bash']); assert.equal(await plan.block('bash', {}), undefined);
   await plan.enter(a.record.id, []); await plan.submit(); await plan.approve(a.revision); assert.equal(plan.state.phase, 'executing');
 }));

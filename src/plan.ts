@@ -65,12 +65,13 @@ export class PlanController {
     if (!this.active) throw new Error("沒有進行中的計畫。先用 /plan <目標> 開始規劃。");
     await this.sync();
     if (this.state.phase === "executing") throw new Error("實作進行中。要修改計畫請先 /plan revise。");
+    if (this.state.phase === "done") throw new Error("計畫已完成。要再修改請先 /plan revise，或 /plan off 退出。");
     this.set({ ...this.state, phase: "review", approval: undefined });
   }
   /** Approves the exact saved revision and starts execution in one persisted step. Review is optional. */
   async approve(expectedRevision: string) {
     await this.sync();
-    if (!["planning", "review"].includes(this.state.phase)) throw new Error(this.state.phase === "executing" ? "這個版本已在實作中。" : "沒有可核准的計畫。先用 /plan <目標> 開始規劃。");
+    if (!["planning", "review"].includes(this.state.phase)) throw new Error(this.state.phase === "executing" ? "這個版本已在實作中。" : this.state.phase === "done" ? "計畫已完成。要再實作請先 /plan revise。" : "沒有可核准的計畫。先用 /plan <目標> 開始規劃。");
     if (this.state.revision !== expectedRevision) throw new Error("計畫在確認期間已變更，未放行實作。請檢視新版本後再 /plan approve。");
     this.set({ ...this.state, phase: "executing", approval: { revision: expectedRevision, approvedAt: new Date().toISOString() } });
   }
@@ -79,7 +80,7 @@ export class PlanController {
     await this.sync(); this.set({ ...this.state, phase: "planning", approval: undefined });
   }
   finish() {
-    if (this.state.phase !== "executing") throw new Error("沒有正在實作的計畫，無法標記完成。");
+    if (this.state.phase !== "executing") throw new Error("沒有正在實作的計畫，無法標記完成。先用 /plan approve 核准並開始實作。");
     this.set({ ...this.state, phase: "done" });
   }
   off() { const tools = this.state.previousTools; this.set({ v: 1, phase: "off" }); return tools; }

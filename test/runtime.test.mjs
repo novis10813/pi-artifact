@@ -136,6 +136,16 @@ test('revise and done give explicit feedback without granting execution', () => 
   assert.equal((await f.tool('write')).block, true);
   await f.command('done'); assert.match(last(f), /沒有正在實作的計畫/);
   await f.command('approve'); await f.command('done'); assert.match(last(f), /已標記完成/); assert.equal((await f.tool('write')).block, true);
+  await f.command('review'); assert.match(last(f), /計畫已完成.*\/plan revise/);
+  await f.command('approve'); assert.match(last(f), /計畫已完成.*\/plan revise/); assert.equal((await f.tool('write')).block, true);
+  await f.command('revise'); await f.command('approve');
+  await assert.rejects(f.tool('create_artifact', { content: '# hijack' }), /實作進行中/);
+  assert.match((await f.store.read((await f.store.list())[0].id)).content, /Goal/);
+}));
+test('corrupt plan state: off reports tools were not restored; goal start names the corrupt state', () => fixture(async f => {
+  f.entries.push({ type: 'custom', customType: 'pi-artifact:plan:v1', data: 'bad' }); await f.emit('session_start');
+  await f.command('new goal'); assert.match(last(f), /狀態損毀.*\/plan off/);
+  await f.command('off'); assert.match(last(f), /工具未還原.*\/reload/); assert.equal(f.notices.at(-1).type, 'warning');
 }));
 test('bare /plan shows usage only; reserved words in goal text start a plan; completions are phase-aware', () => fixture(async f => {
   const complete = prefix => f.commands.get('plan').getArgumentCompletions(prefix);
