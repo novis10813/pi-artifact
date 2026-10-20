@@ -31,7 +31,7 @@ export class DocumentPane implements Component, Focusable {
   interrupt(): boolean {
     if (this.prompt) this.prompt = undefined;
     else if (this.document.buffer.mode === "insert") this.document.buffer.normal();
-    else return false;
+    else { this.pending = ""; return false; }
     this.redraw(); return true;
   }
   private run(kind: ":" | "/", text: string): void {
@@ -113,9 +113,14 @@ export class DocumentPane implements Component, Focusable {
     if (this.prompt) {
       // The command line owns the IME cursor so CJK search text composes in place.
       // Keep the tail visible: that is where typing and IME composition happen.
-      const room = Math.max(0, width - 3), chars = graphemes(safe(this.prompt.kind + this.prompt.text));
-      let fitted = chars.join("");
-      while (chars.length > 1 && visibleWidth(fitted) > room) { chars.splice(1, 1); fitted = chars[0] + "…" + chars.slice(2).join(""); }
+      const room = Math.max(0, width - 3), cells = graphemes(safe(this.prompt.kind + this.prompt.text));
+      let fitted = cells.join("");
+      if (visibleWidth(fitted) > room) {
+        const head = cells[0] + "…";
+        let budget = room - visibleWidth(head), i = cells.length;
+        while (i > 1 && budget >= visibleWidth(cells[i - 1])) budget -= visibleWidth(cells[--i]);
+        fitted = head + cells.slice(i).join("");
+      }
       fitted = truncateToWidth(fitted, room, "");
       output.push(frame(theme.fg("text", fitted) + (this.focused ? CURSOR_MARKER + renderFakeCursor(" ") : "")));
     } else {

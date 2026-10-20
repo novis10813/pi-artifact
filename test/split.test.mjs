@@ -136,6 +136,20 @@ test('command integration protects dirty drafts and saves/copies explicitly', as
   await command('close'); assert.equal(f.active().layoutRoot, f.original); assert.equal(f.statuses.size, 0);
   await events.get('session_shutdown')({}, f.ctx);
 }));
+test('save reports concurrent saves and keeps a written file successful when plan sync fails', async () => fixture(async f => {
+  let release; const gate = new Promise(r => release = r);
+  const pane = extension({ registerCommand() {}, on() {} }, async () => { await gate; throw new Error('plan sync failed'); });
+  await pane.open(f.path, f.ctx);
+  f.editor().handleInput('\x1b[17~'); f.editor().handleInput('i'); f.editor().handleInput('draft');
+  const first = pane.save(); await new Promise(r => setTimeout(r, 50));
+  assert.equal(await pane.save(), false);
+  assert.ok(tui.stripTerminalSequences(renderLayoutFrame(f.active().layoutRoot, 160, 30, () => {}).lines.join('\n')).includes('Save already in progress'));
+  release(); assert.equal(await first, true);
+  assert.ok((await readFile(f.path, 'utf8')).startsWith('draft'));
+  assert.ok(f.notices.some(n => n.type === 'error' && n.text === 'plan sync failed'));
+  assert.equal(await pane.save(), true, 'saving flag is reset');
+  await pane.close?.();
+}));
 test('programmatic reopen of the same artifact preserves chat input focus', async () => fixture(async f => {
   const events = new Map();
   const pane = extension({ registerCommand() {}, on: (name, handler) => events.set(name, handler) });

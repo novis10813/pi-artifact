@@ -90,31 +90,30 @@ export class DocumentBuffer {
   }
   /** Case-sensitive literal search from the cursor, wrapping around the document. */
   search(query: string, forward = true): SearchResult {
-    if (!query) return { found: false, wrapped: false };
-    const text = this.text, here = this.offset({ row: this.row, col: this.col });
-    // Matches must start and end on grapheme boundaries, so "e" never lands inside a decomposed "é".
-    // Only lines containing a candidate are segmented.
-    const boundaries = new Map<number, Set<number>>();
-    const onBoundary = (offset: number) => {
-      const start = text.lastIndexOf("\n", offset - 1) + 1;
-      let set = boundaries.get(start);
-      if (!set) {
-        const end = text.indexOf("\n", start);
-        let at = start; set = new Set([start]);
-        for (const g of graphemes(text.slice(start, end < 0 ? text.length : end))) set.add(at += g.length);
-        boundaries.set(start, set);
+    // The command line strips control characters, so queries are single-line.
+    if (!query || query.includes("\n")) return { found: false, wrapped: false };
+    const matches: Position[] = [];
+    for (let row = 0; row < this.lines.length; row++) {
+      const line = this.lines[row];
+      let i = line.indexOf(query);
+      if (i < 0) continue;
+      // Matches must start and end on grapheme boundaries, so "e" never lands inside a decomposed "é".
+      // Only lines containing a candidate are segmented, once each.
+      const cols = new Map([[0, 0]]);
+      let at = 0, col = 0;
+      for (const g of graphemes(line)) cols.set(at += g.length, ++col);
+      for (; i >= 0; i = line.indexOf(query, i + 1)) {
+        const start = cols.get(i);
+        if (start !== undefined && cols.has(i + query.length)) matches.push({ row, col: start });
       }
-      return set.has(offset);
-    };
-    const matches: number[] = [];
-    for (let i = text.indexOf(query); i >= 0; i = text.indexOf(query, i + 1))
-      if (onBoundary(i) && onBoundary(i + query.length)) matches.push(i);
+    }
     if (!matches.length) return { found: false, wrapped: false };
-    let target = forward ? matches.find(i => i > here) : matches.findLast(i => i < here);
+    const after = (p: Position) => p.row > this.row || p.row === this.row && p.col > this.col;
+    const before = (p: Position) => p.row < this.row || p.row === this.row && p.col < this.col;
+    let target = forward ? matches.find(after) : matches.findLast(before);
     const wrapped = target === undefined;
     target ??= forward ? matches[0] : matches.at(-1)!;
-    const before = text.slice(0, target).split("\n");
-    this.row = before.length - 1; this.col = graphemes(before.at(-1)!).length; this.clamp();
+    this.row = target.row; this.col = target.col; this.clamp();
     return { found: true, wrapped };
   }
   home(): void { this.col = 0; }

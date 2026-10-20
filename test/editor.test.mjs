@@ -150,6 +150,7 @@ test('pane / search, n/N, cancel, and command line owns the IME cursor', async (
   pane.handleInput('n'); assert.deepEqual(at(document.buffer), [0, 2]); assert.ok(pane.message.includes('wrapped'));
   pane.handleInput('N'); assert.deepEqual(at(document.buffer), [1, 3]);
   for (const key of '/none') pane.handleInput(key); pane.handleInput('\x1b'); assert.deepEqual(at(document.buffer), [1, 3]);
+  assert.ok(!plain(pane.render(60).join('\n')).includes('/none'), 'Esc closes the search prompt');
   for (const key of '/none') pane.handleInput(key); pane.handleInput('\x03'); assert.deepEqual(at(document.buffer), [1, 3]);
   for (const key of '/none\r') pane.handleInput(key); assert.deepEqual(at(document.buffer), [1, 3]);
   assert.equal(pane.message, 'Pattern not found: none');
@@ -161,6 +162,8 @@ test('long lines stay fast for word motions and search', () => {
   for (const motion of ['w', 'e', 'b']) assert.ok(timed(() => b.word(motion)) < 300, `${motion} is linear`);
   assert.deepEqual(at(b), [1, 0]);
   assert.ok(timed(() => b.search('y')) < 300, 'search is linear');
+  const many = new DocumentBuffer('x'.repeat(40000));
+  assert.ok(timed(() => many.search('x')) < 300, 'many matches on one long line stay linear');
 });
 test('narrow command line keeps the typed tail visible', async () => fixture(async ({ document }) => {
   const pane = new DocumentPane(document, () => theme, () => 24, () => {}, () => true, () => {});
@@ -169,6 +172,12 @@ test('narrow command line keeps the typed tail visible', async () => fixture(asy
   const line = pane.render(30).find(line => line.includes(tui.CURSOR_MARKER));
   const visible = plain(line); assert.ok(visible.includes('/…') && visible.includes('TAIL'), visible);
   assert.ok(pane.render(30).every(line => tui.visibleWidth(line) <= 30));
+  pane.handleInput('\x1b[200~' + '中'.repeat(16000) + '尾\x1b[201~');
+  const start = performance.now(); const wide = pane.render(30);
+  assert.ok(performance.now() - start < 300, 'long prompt renders in linear time');
+  assert.ok(plain(wide.find(line => line.includes(tui.CURSOR_MARKER))).includes('尾'));
+  assert.ok(wide.every(line => tui.visibleWidth(line) <= 30));
+  for (const width of [4, 5, 6]) assert.ok(pane.render(width).every(line => tui.visibleWidth(line) <= width));
 }));
 test('unsupported operator sequences are cancelled instead of running the motion', async () => fixture(async ({ document }) => {
   document.buffer.replace('alpha beta'); document.buffer.col = 0;
@@ -176,6 +185,12 @@ test('unsupported operator sequences are cancelled instead of running the motion
   for (const key of 'dw') pane.handleInput(key); assert.deepEqual(at(document.buffer), [0, 0]);
   for (const key of 'y:') pane.handleInput(key); pane.handleInput('w'); assert.deepEqual(at(document.buffer), [0, 6]);
   assert.equal(document.buffer.text, 'alpha beta');
+}));
+test('Ctrl+C in Normal Mode cancels a pending operator before pi sees it', async () => fixture(async ({ document }) => {
+  const pane = new DocumentPane(document, () => theme, () => 24, () => {}, () => true, () => {});
+  const before = document.buffer.text;
+  pane.handleInput('d'); assert.equal(pane.interrupt(), false); pane.handleInput('d');
+  assert.equal(document.buffer.text, before);
 }));
 test('Ctrl+C leaves Insert Mode without touching text; w/e/b move visual selection', async () => fixture(async ({ document }) => {
   const pane = new DocumentPane(document, () => theme, () => 24, () => {}, () => true, () => {});
