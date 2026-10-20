@@ -1,0 +1,135 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { resolve, join, basename } from "node:path";
+import { getAgentDir, withFileMutationQueue, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { DocumentSession } from "./document.ts";
+import { SplitView } from "./split.ts";
+
+/** Owns only the document pane. Lifecycle and permission state live in extension.ts. */
+export default function installPane(pi: ExtensionAPI, changed?: (ctx: ExtensionContext) => Promise<void>) {
+  let document: DocumentSession | undefined;
+  let view: SplitView | undefined;
+  let context: ExtensionContext | undefined;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let refreshing = false;
+  let saving = false;
+  let lastError = "";
+  const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
+  const stop = () => { if (timer) clearInterval(timer); timer = undefined; };
+  const detach = () => { stop(); view?.unmount(); view = undefined; context?.ui.setStatus("plan-pane", undefined); };
+  const save = async () => {
+    if (!document || saving) return;
+    if (refreshing) { view?.message("Reading disk · press Ctrl+S again shortly"); return; }
+    const target = document, targetView = view;
+    saving = true;
+    try {
+      await target.save(withFileMutationQueue); targetView?.message("Saved · F6 chat / document");
+      context?.ui.setStatus("plan-pane", "plan");
+      if (context) await changed?.(context);
+    }
+    catch (error) { targetView?.message(errorText(error)); context?.ui.notify(errorText(error), "error"); }
+    finally { saving = false; }
+  };
+  const refresh = async () => {
+    if (refreshing || saving || !document || !view) return;
+    refreshing = true;
+    const target = document, targetView = view;
+    try {
+      if (!targetView.attached) {
+        detach(); context?.ui.notify("Plan pane detached after layout/editor change. Draft retained. Use /plan-pane show or copy <path>.", "warning");
+        return;
+      }
+      const before = target.buffer.text;
+      await target.refresh();
+      if (before !== target.buffer.text && context) await changed?.(context);
+      if (document !== target || view !== targetView) return;
+      if (target.conflict) targetView.message("Disk changed · draft kept · /plan-pane copy <path>");
+      else if (lastError) targetView.message("F6 chat / document");
+      lastError = "";
+      context?.ui.setStatus("plan-pane", `plan${target.dirty ? "*" : ""}${target.conflict ? " conflict" : ""}`);
+    } catch (error) {
+      const message = errorText(error);
+      targetView.message(message);
+      if (message !== lastError) context?.ui.notify(message, "error");
+      lastError = message;
+    } finally { refreshing = false; }
+  };
+  const show = (ctx: ExtensionContext, focus = true) => {
+    if (!document) throw new Error("Open a Markdown file first: /plan-pane open <path.md>");
+    if (ctx.mode !== "tui") throw new Error("Plan pane requires interactive fullscreen mode.");
+    if (view?.attached) { if (focus) view.focusPlan(); return; }
+    detach(); context = ctx;
+    const next = new SplitView(ctx, document, () => { void save(); });
+    next.mount(); view = next;
+    ctx.ui.setStatus("plan-pane", `plan${document.dirty ? "*" : ""}`);
+    timer = setInterval(() => { void refresh(); }, 500); timer.unref?.();
+  };
+  const open = async (path: string, ctx: ExtensionContext) => {
+    if (saving || refreshing) throw new Error("Document I/O in progress. Try again shortly.");
+    if (document?.path === path) { show(ctx, false); return; }
+    if (document?.dirty) throw new Error("Unsaved draft. Save, copy, or discard it first.");
+    const next = await DocumentSession.open(path);
+    detach(); document = next; show(ctx);
+  };
+  pi.registerCommand("plan-pane", {
+    description: "Split Markdown editor: open <path.md>, show, save, copy <new.md>, close, discard",
+    handler: async (args, ctx) => {
+      const match = args.trim().match(/^(\S+)(?:\s+([\s\S]+))?$/);
+      const action = match?.[1] ?? "show", path = match?.[2];
+      try {
+        if (saving || refreshing) throw new Error("Document I/O in progress. Try again shortly.");
+        if (action === "open") {
+          if (!path) throw new Error("Usage: /plan-pane open <existing-path.md> (spaces allowed, no quotes needed)");
+          if (document?.dirty) throw new Error("Unsaved draft. Save, copy, or explicitly discard it before opening another file.");
+          if (ctx.mode !== "tui") throw new Error("Plan pane requires interactive fullscreen mode.");
+          const next = await DocumentSession.open(resolve(ctx.cwd, path));
+          detach(); document = next; show(ctx);
+        } else if (action === "show") show(ctx);
+        else if (action === "save") { if (!document) throw new Error("No document open."); await save(); }
+        else if (action === "copy") {
+          if (!path || !document) throw new Error("Usage: /plan-pane copy <new-path.md>");
+          const target = resolve(ctx.cwd, path); await document.saveCopy(target);
+          ctx.ui.notify(`Draft copy saved: ${target}`, "info");
+        } else if (action === "close" || action === "discard") {
+          if (document?.dirty && action !== "discard") throw new Error("Unsaved draft. Save/copy it, or explicitly use /plan-pane discard.");
+          detach(); document = undefined;
+        } else throw new Error("Usage: /plan-pane open <path.md> | show | save | copy <new.md> | close | discard");
+      } catch (error) { ctx.ui.notify(errorText(error), "error"); }
+    },
+  });
+  // Session navigation must not abandon a dirty workspace draft or associate it
+  // with a different branch. /reload and shutdown use a private recovery copy.
+  const beforeNavigation = (_event: unknown, ctx: ExtensionContext) => {
+    if (document?.dirty || saving || refreshing) {
+      ctx.ui.notify("Save/copy/discard the plan-pane draft before changing sessions or branches.", "warning");
+      return { cancel: true };
+    }
+    detach(); document = undefined;
+    return undefined;
+  };
+  pi.on("session_before_switch", beforeNavigation);
+  pi.on("session_before_fork", beforeNavigation);
+  pi.on("session_before_tree", beforeNavigation);
+  pi.on("session_shutdown", async (_event, ctx) => {
+    stop();
+    if (document?.dirty) {
+      const directory = join(getAgentDir(), "drafts", "pi-artifact");
+      try {
+        await mkdir(directory, { recursive: true, mode: 0o700 });
+        const path = join(directory, `${Date.now()}-${randomUUID()}-${basename(document.path)}`);
+        await writeFile(path, document.buffer.text, { flag: "wx", mode: 0o600 });
+        ctx.ui.notify(`Unsaved plan draft recovered to ${path}`, "warning");
+      } catch (error) {
+        ctx.ui.notify(`Could not recover plan draft: ${errorText(error)}`, "error");
+        process.stderr.write(`pi-artifact: unsaved draft recovery failed: ${errorText(error)}\n`);
+      }
+    }
+    detach(); document = undefined;
+  });
+  return { open, show, save, refresh,
+    get document() { return document; },
+    get busy() { return saving || refreshing; },
+    get dirty() { return document?.dirty ?? false; },
+    close() { if (document?.dirty) throw new Error("Unsaved draft. Save/copy/discard it first."); detach(); document = undefined; },
+  };
+}
