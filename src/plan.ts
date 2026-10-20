@@ -82,8 +82,8 @@ export class PlanController {
     await this.sync(); this.set({ ...this.state, phase: "planning", approval: undefined });
   }
   finish() {
-    if (this.state.phase !== "executing") throw new Error(this.state.phase === "done" ? "計畫已標記完成。要再實作請先 /plan revise。" : "沒有正在實作的計畫，無法標記完成。先用 /plan approve 核准並開始實作。");
-    this.set({ ...this.state, phase: "done" });
+    if (this.state.phase !== "executing") throw new Error(this.state.phase === "done" ? "計畫已完成，要再實作請先 /plan revise。" : "沒有正在實作的計畫，無法標記完成。先用 /plan approve 核准並開始實作。");
+    this.set({ ...this.state, phase: "done", approval: undefined });
   }
   off() { const tools = this.state.previousTools; this.set({ v: 1, phase: "off" }); return tools; }
   async block(tool: string, input: Record<string, unknown>, dirty = false): Promise<string | undefined> {
@@ -99,8 +99,9 @@ export class PlanController {
   }
   prompt(): string {
     if (!this.active) return "";
+    if (this.state.phase === "done") return `Plan Mode: done. Active plan ${this.state.artifactId}, revision ${this.state.revision}. Implementation is finished and project writes/shell are blocked again. Edits do not reopen this plan; do not call request_plan_review. Only the user's /plan revise reopens it, or /plan off exits.`;
     return `Plan Mode: ${this.state.phase}. Active plan ${this.state.artifactId}, revision ${this.state.revision}. ${this.state.phase === "executing"
       ? "Implement only this approved revision. Reuse existing task, verification and reviewer tools. Plan content changes revoke permission before the next tool call."
-      : "Do not implement project changes or run shells/delegation/codemode. Explore with read/grep/find/ls/web tools. Read and update the SAME artifact using read_artifact/edit_artifact/replace_artifact, not a new plan per reply. Save is not approval. " + (this.state.phase === "done" ? "This plan is done; edits do not reopen it, only the user's /plan revise does." : "Keep answering questions and revising during review; any edit returns the plan to planning and invalidates earlier review conclusions.") + " When ready call request_plan_review and end your turn. Only the user's /plan approve authorizes execution; it approves this exact revision and starts implementation."}`;
+      : "Do not implement project changes or run shells/delegation/codemode. Explore with read/grep/find/ls/web tools. Read and update the SAME artifact using read_artifact/edit_artifact/replace_artifact, not a new plan per reply. Save is not approval. Keep answering questions and revising during review; any edit returns the plan to planning and invalidates earlier review conclusions. When ready call request_plan_review and end your turn. Only the user's /plan approve authorizes execution; it approves this exact revision and starts implementation."}`;
   }
 }
