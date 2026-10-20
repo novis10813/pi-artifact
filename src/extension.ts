@@ -58,8 +58,8 @@ export default function (pi: ExtensionAPI): void {
     catch (error) { ctx.ui.notify(`Artifact saved, pane unavailable: ${errorText(error)}`, "warning"); }
   };
   const idle = (ctx: ExtensionContext) => {
-    if (!ctx.isIdle()) throw new Error("Wait for the agent to finish or interrupt it first.");
-    if (pane.busy || pane.dirty) throw new Error("Save/copy/discard the manual draft before changing Plan Mode state.");
+    if (!ctx.isIdle()) throw new Error("模型仍在回應。等它結束或先中斷（Esc），再執行這個指令。");
+    if (pane.busy || pane.dirty) throw new Error("右側有未儲存編輯。先 :w 儲存、/plan-pane copy 或 discard，再變更 Plan Mode 狀態。");
   };
   const review = async (a: Artifact, ctx: ExtensionContext) => {
     if (ctx.mode !== "tui") throw new Error("Interactive terminal review required. The artifact is available through read_artifact in other modes.");
@@ -75,10 +75,8 @@ export default function (pi: ExtensionAPI): void {
     if (!result || result.decision === "abandoned") return;
     const saved = await store!.review(a.record.id, previous.revision, result.decision, result.overallComment, [...result.lineComments].map(([line, comment]) => ({ line, comment })));
     if (pending === a.record.id) setPending();
-    if (plan?.active && plan.state.artifactId === a.record.id) {
-      if (result.decision === "rejected") await plan.revise();
-      ctx.ui.notify(`Review ${result.decision}. Execution is still locked. ${result.decision === "approved" ? "Use /plan approve, then /plan execute." : "Continue revising this plan."}`, "info");
-    }
+    // Line review is a compatibility feature; it never changes Plan Mode phase or authorization.
+    if (plan?.active && plan.state.artifactId === a.record.id) ctx.ui.notify(`Line review ${result.decision} saved. It does not change Plan Mode or authorize execution; use /plan approve for that.`, "info");
     pi.sendUserMessage(`Artifact review result:\n${JSON.stringify({ artifactId: a.record.id, revision: previous.revision, approved: result.decision === "approved", comments: saved.lineComments.map(c => ({ line: c.line, text: lines[c.line - 1]?.trim() ? lines[c.line - 1] : lines.slice(0, c.line - 1).findLast(line => line.trim()) ?? "", comment: c.comment })), overallComment: saved.overallComment ?? "", executionApproved: false })}`);
     loadout(); status(ctx);
   };
@@ -135,7 +133,7 @@ export default function (pi: ExtensionAPI): void {
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       const p = ensure(ctx); guardDraft(p.plan.state.artifactId ?? "plan"); await p.plan.submit();
       loadout(); status(ctx);
-      return { ...text(`Plan ${p.plan.state.artifactId} ready. STOP. User: /plan review, /plan approve, then /plan execute.`, { artifactId: p.plan.state.artifactId, revision: p.plan.state.revision }), terminate: true };
+      return { ...text(`Plan ${p.plan.state.artifactId} submitted. End this turn. The user may keep discussing, run /plan review (optional), or /plan approve to approve and start implementation.`, { artifactId: p.plan.state.artifactId, revision: p.plan.state.revision }), terminate: true };
     },
   });
   pi.registerCommand("artifact", {
@@ -169,46 +167,84 @@ export default function (pi: ExtensionAPI): void {
       finally { commandBusy = false; }
     },
   });
+  const short = (revision?: string) => revision?.slice(0, 8) ?? "?";
+  // Subcommands, their purpose, and why each is unavailable in the current phase (undefined = available).
+  const SUBCOMMANDS: Array<{ name: string; description: string; blocked: () => string | undefined }> = [
+    { name: "status", description: "顯示目前階段與用法", blocked: () => undefined },
+    { name: "show", description: "重新開啟右側計畫文件", blocked: () => plan?.active ? undefined : "沒有進行中的計畫" },
+    { name: "review", description: "選用：以唯讀子代理審查目前版本", blocked: () => !plan?.active ? "沒有進行中的計畫" : plan.state.phase === "executing" ? "實作進行中" : plan.state.phase === "done" ? "計畫已完成" : undefined },
+    { name: "approve", description: "核准目前已儲存的版本並立即開始實作", blocked: () => !plan?.active ? "沒有進行中的計畫" : ["planning", "review"].includes(plan.state.phase) ? (pane.dirty ? "右側有未儲存編輯" : undefined) : plan.state.phase === "executing" ? "已在實作中" : "計畫已完成" },
+    { name: "revise", description: "回到規劃，撤銷執行授權", blocked: () => plan?.active ? undefined : "沒有進行中的計畫" },
+    { name: "done", description: "標記實作完成，再次封鎖寫入", blocked: () => plan?.state.phase === "executing" ? undefined : "沒有正在實作的計畫" },
+    { name: "off", description: "退出 Plan Mode 並恢復原本工具權限", blocked: () => plan?.active ? undefined : "沒有進行中的計畫" },
+    { name: "use", description: "<artifact-id> 以既有 artifact 開始規劃", blocked: () => plan?.active ? "已有進行中的計畫" : undefined },
+  ];
+  const usage = () => [
+    plan?.active ? `目前：PLAN ${plan.state.phase} · ${plan.state.artifactId} · rev ${short(plan.state.revision)}${plan.state.phase === "executing" ? "（已核准實作）" : "（尚未允許實作）"}` : "目前：未在 Plan Mode",
+    "/plan <目標>　開始規劃",
+    ...SUBCOMMANDS.map(c => `/plan ${c.name}　${c.description}${c.blocked() ? `（不可用：${c.blocked()}）` : ""}`),
+  ].join("\n");
+  const start = async (a: Artifact, goal: string | undefined, ctx: ExtensionCommandContext) => {
+    const p = ensure(ctx);
+    await p.plan.enter(a.record.id, pi.getActiveTools()); await open(a, ctx);
+    loadout(); status(ctx);
+    ctx.ui.notify(`已開始規劃 ${a.record.id}。模型會探索並修改同一份計畫，尚未允許實作。下一步：繼續討論，或 /plan review（選用）、/plan approve 核准並開始實作。`, "info");
+    pi.sendUserMessage(`Plan Mode enabled for ${a.record.id}. ${goal ?? "Use the conversation's requirements."} Explore and revise this SAME artifact. Do not implement. Submit with request_plan_review when ready.`);
+  };
   pi.registerCommand("plan", {
-    description: "Plan Mode: on [goal], use <artifact-id>, status, show, review, approve, execute, revise, done, off",
+    description: "Plan Mode：/plan <目標> 開始規劃 · review 選用審查 · approve 核准並執行 · off 退出",
+    getArgumentCompletions: prefix => {
+      // Free-form goal text is never forced into a subcommand.
+      if (/\s/.test(prefix)) return null;
+      const items = SUBCOMMANDS.filter(c => c.name.startsWith(prefix)).map(c => {
+        const reason = c.blocked();
+        return { value: c.name, label: c.name, description: reason ? `${c.description}（目前不可用：${reason}）` : c.description };
+      });
+      return items.length ? items : null;
+    },
     handler: async (args, ctx: ExtensionCommandContext) => {
-      if (commandBusy) { ctx.ui.notify("Another artifact/plan command is active.", "warning"); return; }
+      if (commandBusy) { ctx.ui.notify("另一個 artifact/plan 指令正在執行，請稍候。", "warning"); return; }
       commandBusy = true;
       try {
-        const p = ensure(ctx), match = args.trim().match(/^(\S+)(?:\s+([\s\S]+))?$/), action = match?.[1] ?? "status", value = match?.[2];
-        if (action === "status") { ctx.ui.notify(JSON.stringify(p.plan.state, null, 2), "info"); return; }
-        if (action === "show") { if (!p.plan.active) throw new Error("No active plan."); await open(await p.store.read(p.plan.state.artifactId!), ctx); return; }
+        const p = ensure(ctx), raw = args.trim(), [first = "", ...rest] = raw.split(/\s+/), value = rest.join(" ");
+        // Reserved words are subcommands only when bare (or `use <id>`); anything else is a goal.
+        const action = !raw ? "status" : first === "on" ? "on" : first === "use" && rest.length === 1 ? "use" : !rest.length && SUBCOMMANDS.some(c => c.name === first) || raw === "execute" ? first : "goal";
+        if (action === "status") { ctx.ui.notify(usage(), "info"); return; }
+        if (action === "use" && !value) throw new Error("用法：/plan use <artifact-id>");
+        if (action === "on") throw new Error("/plan on 已移除。直接用 /plan <目標> 開始規劃。");
+        if (action === "execute") throw new Error("/plan execute 已移除。用 /plan approve 核准目前版本並立即開始實作。");
+        if (action === "show") { if (!p.plan.active) throw new Error("沒有進行中的計畫。先用 /plan <目標> 開始規劃。"); await open(await p.store.read(p.plan.state.artifactId!), ctx); return; }
+        if (action === "off" && !p.plan.active) { ctx.ui.notify("目前不在 Plan Mode，沒有需要退出的計畫。", "info"); return; }
         idle(ctx);
-        if (action === "on" || action === "use") {
-          if (p.plan.active) throw new Error("A plan is already active. Use /plan revise, or /plan off before switching.");
-          const a = action === "use" ? await p.store.resolve(value ?? "") : await p.store.create(`# Plan\n\n## Goal\n${value ?? "Discuss and define the requested change."}\n\n## Approach\n\n## Verification\n\n## Not doing\n`, value ?? "Plan");
-          await p.plan.enter(a.record.id, pi.getActiveTools()); await open(a, ctx);
-          loadout(); status(ctx);
-          pi.sendUserMessage(`Plan Mode enabled for ${a.record.id}. ${value ?? "Use the conversation's requirements."} Explore and revise this SAME artifact. Do not implement. Submit with request_plan_review when ready.`);
+        if (action === "goal" || action === "use") {
+          if (p.plan.active) throw new Error(`已有進行中的計畫 ${p.plan.state.artifactId}。用 /plan off 退出後再開始新計畫。`);
+          const goal = action === "goal" ? raw : undefined;
+          await start(action === "use" ? await p.store.resolve(value) : await p.store.create(`# Plan\n\n## Goal\n${goal}\n\n## Approach\n\n## Verification\n\n## Not doing\n`, goal), goal, ctx);
         } else if (action === "off") {
-          if (p.plan.active && !(await ctx.ui.confirm("Leave Plan Mode?", "This removes the planning restrictions, without approving or executing the plan. Continue?"))) return;
+          if (!(await ctx.ui.confirm("退出 Plan Mode？", "將移除規劃限制並恢復原本的工具權限。計畫不會被核准或執行。"))) { ctx.ui.notify("已取消，仍在 Plan Mode。", "info"); return; }
           const tools = p.plan.off(); if (tools) pi.setActiveTools(tools); status(ctx);
+          ctx.ui.notify("已退出 Plan Mode，已恢復原本的工具權限。計畫未被核准或執行。", "info");
         } else if (action === "review") {
-          await p.plan.submit(); loadout(); status(ctx); await review(await p.store.read(p.plan.state.artifactId!), ctx);
+          await p.plan.submit(); loadout(); status(ctx);
+          ctx.ui.notify(`已提交 rev ${short(p.plan.state.revision)} 審查。審查不是執行授權，可繼續提問與修改；修改後會回到規劃。`, "info");
         } else if (action === "approve") {
-          if (ctx.mode !== "tui") throw new Error("Plan approval requires the interactive user confirmation dialog.");
+          if (ctx.mode !== "tui") throw new Error("核准執行需要互動式確認視窗，請在 pi 終端介面中執行 /plan approve。");
           await p.plan.sync(); const revision = p.plan.state.revision;
-          if (p.plan.state.phase !== "review" || !revision) throw new Error("Submit/review the plan before approving it.");
+          if (!["planning", "review"].includes(p.plan.state.phase) || !revision) throw new Error(p.plan.state.phase === "executing" ? "這個版本已在實作中。" : "沒有可核准的計畫。先用 /plan <目標> 開始規劃。");
           const a = await p.store.read(p.plan.state.artifactId!); await open(a, ctx);
-          if (await ctx.ui.confirm("Approve this exact plan revision?", `${a.record.id}\nSHA-256 ${revision}\nThis approves the document only. /plan execute is a separate action.`)) {
-            idle(ctx); await p.plan.approve(revision); status(ctx);
-          }
-        } else if (action === "execute") {
-          if (ctx.mode !== "tui") throw new Error("Execution requires the interactive user confirmation dialog.");
-          await p.plan.sync(); const revision = p.plan.state.revision;
-          if (p.plan.state.phase !== "approved" || !revision) throw new Error("Use /plan approve first.");
-          if (await ctx.ui.confirm("Start approved implementation?", `Plan ${p.plan.state.artifactId}\nSHA-256 ${revision}\nProject writes, shell commands and delegated work will become available. Existing work outside this session is not controlled.`)) {
-            idle(ctx); await p.plan.execute(revision); loadout(); status(ctx);
-            pi.sendUserMessage(`Execute approved plan ${p.plan.state.artifactId}, exact revision ${revision}. Read it with read_artifact. Reuse existing tasks, set_verify, and reviewers. Do not silently broaden scope. If the plan changes, return to planning and obtain a fresh approval.`);
-          }
-        } else if (action === "revise") { await p.plan.revise(); if (pending) setPending(); loadout(); status(ctx); }
-        else if (action === "done") { p.plan.finish(); loadout(); status(ctx); }
-        else throw new Error("Usage: /plan on [goal] | use <id> | status | show | review | approve | execute | revise | done | off");
+          const ok = await ctx.ui.confirm("核准並開始實作？", `${a.record.id}\nSHA-256 ${revision}\n確認後立即開始實作這個確切版本，並開放專案寫入、shell 指令與委派（subagent、workflow 等）。計畫之後若變更，授權會自動撤銷。`);
+          if (!ok) { ctx.ui.notify("已取消核准，仍在規劃中，尚未允許實作。", "info"); return; }
+          // The draft or the file may have changed while the dialog was open.
+          idle(ctx); await p.plan.approve(revision); loadout(); status(ctx);
+          ctx.ui.notify(`已核准 rev ${short(revision)} 並開始實作。計畫變更會自動撤銷授權；完成後用 /plan done，或 /plan off 退出。`, "info");
+          pi.sendUserMessage(`Execute approved plan ${p.plan.state.artifactId}, exact revision ${revision}. Read it with read_artifact. Reuse existing tasks, set_verify, and reviewers. Do not silently broaden scope. If the plan changes, return to planning and obtain a fresh approval.`);
+        } else if (action === "revise") {
+          await p.plan.revise(); if (pending) setPending(); loadout(); status(ctx);
+          ctx.ui.notify("已回到規劃模式，可以繼續提問與修改計畫；尚未允許實作", "info");
+        } else if (action === "done") {
+          p.plan.finish(); loadout(); status(ctx);
+          ctx.ui.notify("已標記完成，專案寫入與 shell 再次封鎖。用 /plan off 退出並恢復工具。", "info");
+        }
       } catch (error) { ctx.ui.notify(errorText(error), "error"); }
       finally { commandBusy = false; }
     },
@@ -219,7 +255,7 @@ export default function (pi: ExtensionAPI): void {
     if (pending && ctx.hasUI) return { block: true, terminate: true, reason: `Artifact ${pending} is awaiting review. End this turn. Use /artifact to review.` };
     const reason = await p.plan.block(event.toolName, event.input as Record<string, unknown>, pane.dirty);
     loadout(); status(ctx);
-    if (reason) return { block: true, terminate: p.plan.state.phase === "review", reason };
+    if (reason) return { block: true, reason };
   });
   pi.on("user_bash", async (_event, ctx) => {
     const p = ensure(ctx);

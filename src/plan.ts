@@ -1,5 +1,6 @@
 import type { ArtifactStore } from "./store.ts";
 
+// "approved" is only parsed from older sessions; approval now starts execution in one step.
 export type Phase = "off" | "planning" | "review" | "approved" | "executing" | "done";
 export interface PlanState {
   v: 1; phase: Phase; artifactId?: string; revision?: string;
@@ -39,8 +40,8 @@ export class PlanController {
       if (!state) { this.corrupt = true; this.state = { ...this.state, phase: this.state.artifactId ? "planning" : "off", approval: undefined }; continue; }
       this.state = state; this.corrupt = false;
     }
-    // Reload/resume/tree/fork never silently starts or resumes execution.
-    if (this.state.phase === "executing") this.state = { ...this.state, phase: "approved" };
+    // Reload/resume/tree/fork never silently starts or resumes execution; /plan approve must be confirmed again.
+    if (this.state.phase === "executing" || this.state.phase === "approved") this.state = { ...this.state, phase: "review", approval: undefined };
   }
   async enter(id: string, tools: string[]) {
     const a = await this.store.read(id);
@@ -49,7 +50,7 @@ export class PlanController {
   }
   async sync(): Promise<boolean> {
     if (!this.active) return false;
-    if (this.corrupt) throw new Error("Corrupt persisted Plan Mode state. Use /plan off or /plan on to recover explicitly.");
+    if (this.corrupt) throw new Error("Corrupt persisted Plan Mode state. Use /plan off, then /plan <goal> to recover explicitly.");
     let revision: string;
     try { revision = (await this.store.read(this.state.artifactId!)).revision; }
     catch (error) {
@@ -61,26 +62,24 @@ export class PlanController {
     return true;
   }
   async submit() {
-    if (!this.active) throw new Error("Enable /plan on first.");
+    if (!this.active) throw new Error("沒有進行中的計畫。先用 /plan <目標> 開始規劃。");
     await this.sync();
+    if (this.state.phase === "executing") throw new Error("實作進行中。要修改計畫請先 /plan revise。");
     this.set({ ...this.state, phase: "review", approval: undefined });
   }
+  /** Approves the exact saved revision and starts execution in one persisted step. Review is optional. */
   async approve(expectedRevision: string) {
     await this.sync();
-    if (this.state.phase !== "review" || this.state.revision !== expectedRevision) throw new Error("Plan changed or is not submitted for review. Review it again.");
-    this.set({ ...this.state, phase: "approved", approval: { revision: expectedRevision, approvedAt: new Date().toISOString() } });
-  }
-  async execute(expectedRevision: string) {
-    await this.sync();
-    if (this.state.phase !== "approved" || this.state.revision !== expectedRevision || this.state.approval?.revision !== expectedRevision) throw new Error("Current plan revision is not approved. Use /plan review and /plan approve first.");
-    this.set({ ...this.state, phase: "executing" });
+    if (!["planning", "review"].includes(this.state.phase)) throw new Error(this.state.phase === "executing" ? "這個版本已在實作中。" : "沒有可核准的計畫。先用 /plan <目標> 開始規劃。");
+    if (this.state.revision !== expectedRevision) throw new Error("計畫在確認期間已變更，未放行實作。請檢視新版本後再 /plan approve。");
+    this.set({ ...this.state, phase: "executing", approval: { revision: expectedRevision, approvedAt: new Date().toISOString() } });
   }
   async revise() {
-    if (!this.active) throw new Error("No active plan.");
+    if (!this.active) throw new Error("沒有進行中的計畫。先用 /plan <目標> 開始規劃。");
     await this.sync(); this.set({ ...this.state, phase: "planning", approval: undefined });
   }
   finish() {
-    if (this.state.phase !== "executing") throw new Error("No plan is executing.");
+    if (this.state.phase !== "executing") throw new Error("沒有正在實作的計畫，無法標記完成。");
     this.set({ ...this.state, phase: "done" });
   }
   off() { const tools = this.state.previousTools; this.set({ v: 1, phase: "off" }); return tools; }
@@ -91,15 +90,14 @@ export class PlanController {
       this.set({ ...this.state, phase: "planning", approval: undefined });
     }
     if (!this.restricted) return;
-    if (!PLANNING_TOOLS.has(tool)) return `Plan Mode (${this.state.phase}) blocks ${tool}. Shells, arbitrary code, delegation, background jobs, project writes and unknown tools require an approved revision and /plan execute.`;
+    if (!PLANNING_TOOLS.has(tool)) return `Plan Mode (${this.state.phase}) blocks ${tool}. Shells, arbitrary code, delegation, background jobs, project writes and unknown tools require the user to /plan approve this revision.`;
     if (["edit_artifact", "replace_artifact"].includes(tool) && input.artifactId !== this.state.artifactId) return "Plan Mode may update only its active plan artifact.";
     if (dirty && ["edit_artifact", "replace_artifact", "create_artifact", "request_plan_review"].includes(tool)) return "Unsaved manual plan edits. Save, copy or discard them before a model update or review.";
-    if (this.state.phase === "review" && !["read", "read_artifact", "view_context", "self_compact"].includes(tool)) return "Plan is awaiting user review. Stop this turn. Only explicit /plan revise resumes editing, and /plan approve then /plan execute authorizes work.";
   }
   prompt(): string {
     if (!this.active) return "";
     return `Plan Mode: ${this.state.phase}. Active plan ${this.state.artifactId}, revision ${this.state.revision}. ${this.state.phase === "executing"
       ? "Implement only this approved revision. Reuse existing task, verification and reviewer tools. Plan content changes revoke permission before the next tool call."
-      : "Do not implement project changes or run shells/delegation/codemode. Explore with read/grep/find/ls/web tools. Read and update the SAME artifact using read_artifact/edit_artifact/replace_artifact, not a new plan per reply. Save is not approval. When ready call request_plan_review and end your turn. Only user /plan approve followed by /plan execute authorizes execution."}`;
+      : "Do not implement project changes or run shells/delegation/codemode. Explore with read/grep/find/ls/web tools. Read and update the SAME artifact using read_artifact/edit_artifact/replace_artifact, not a new plan per reply. Save is not approval. Keep answering questions and revising during review; any edit returns the plan to planning and invalidates earlier review conclusions. When ready call request_plan_review and end your turn. Only the user's /plan approve authorizes execution; it approves this exact revision and starts implementation."}`;
   }
 }

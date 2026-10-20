@@ -111,7 +111,7 @@ with tempfile.TemporaryDirectory(prefix="pi-artifact-pty-") as directory:
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 36, 180, 0, 0))
         os.killpg(child.pid, signal.SIGWINCH)
         pump(0.3)
-        command("/plan on Build the tested feature")
+        command("/plan Build the tested feature")
         expect(b"PLAN review", timeout=15)
         index = json.loads((work / ".pi/artifacts/index.json").read_text())
         assert len(index["artifacts"]) == 1
@@ -125,6 +125,11 @@ with tempfile.TemporaryDirectory(prefix="pi-artifact-pty-") as directory:
         assert not (work / "forbidden-shell").exists()
         start = len(output)
         command("/plan review")
+        expect("已提交".encode(), start=start)
+        assert b"Artifact Review" not in output[start:], "/plan review must not open the manual line-review UI"
+        # Legacy /artifact line review remains available and stores comments.
+        start = len(output)
+        command(f"/artifact review {artifact['id']}")
         expect(b"Artifact Review", start=start)
         os.write(master, b"c")
         pump(0.2)
@@ -139,16 +144,11 @@ with tempfile.TemporaryDirectory(prefix="pi-artifact-pty-") as directory:
         assert not (work / "forbidden-after-review").exists()
         assert not (work / "approved.txt").exists()
         start = len(output)
-        command("/plan approve")
-        expect(b"Approve this exact plan revision?", start=start)
-        os.write(master, b"\r")
-        pump(0.5)
-        expect(b"PLAN approved", start=start)
-        command("!touch forbidden-after-approve")
-        assert not (work / "forbidden-after-approve").exists(), "Approval alone unlocked writes"
-        start = len(output)
         command("/plan execute")
-        expect(b"Start approved implementation?", start=start)
+        expect("已移除".encode(), start=start)
+        start = len(output)
+        command("/plan approve")
+        expect("核准並開始實作".encode(), start=start)
         os.write(master, b"\r")
         pump(1)
         expect(b"Implementation complete.", start=start)
@@ -166,7 +166,7 @@ with tempfile.TemporaryDirectory(prefix="pi-artifact-pty-") as directory:
         child.wait(timeout=8)
         assert child.returncode == 0, f"Unexpected pi exit: {child.returncode}"
         assert b"Failed to load extension" not in output
-        print("PTY smoke passed: real pi split/CJK/resize, offline model updates same plan, nested+shell policy, review/approve/execute, approved write, content-change revocation, clean exit.")
+        print("PTY smoke passed: real pi split/CJK/resize, offline model updates same plan, nested+shell policy, optional review, one-step approve+execute, legacy line review, approved write, content-change revocation, clean exit.")
     finally:
         if child.poll() is None:
             os.killpg(child.pid, signal.SIGKILL)
