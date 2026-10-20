@@ -149,7 +149,8 @@ test('save reports concurrent saves and keeps a written file successful when pla
   assert.ok(f.notices.some(n => n.type === 'error' && n.text === 'plan sync failed'));
   assert.equal(await pane.save(), true, 'saving flag is reset');
   await rm(f.path); await import('node:fs/promises').then(fs => fs.mkdir(f.path));
-  f.editor().handleInput('x'); assert.equal(await pane.save(), false, 'write failure is a failed save');
+  // A directory in place of the file makes the pre-write disk check fail.
+  f.editor().handleInput('x'); assert.equal(await pane.save(), false, 'a failed save returns false');
   assert.ok(f.notices.at(-1).type === 'error'); assert.equal(pane.dirty, true, 'failed write keeps the draft');
   await rm(f.path, { recursive: true });
 }));

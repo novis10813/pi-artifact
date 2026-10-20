@@ -195,7 +195,8 @@ test('Ctrl+C in Normal Mode cancels a pending operator before pi sees it', async
   const before = document.buffer.text;
   pane.handleInput('d'); assert.equal(pane.interrupt(), true, 'only the operator is cancelled'); pane.handleInput('d');
   assert.equal(document.buffer.text, before);
-  pane.handleInput('d'); pane.interrupt(); assert.equal(pane.interrupt(), false, 'a second Ctrl+C reaches pi');
+  assert.equal(pane.interrupt(), true, 'the second d is pending again');
+  assert.equal(pane.interrupt(), false, 'the next Ctrl+C reaches pi'); assert.equal(document.buffer.text, before);
 }));
 test('Ctrl+C leaves Insert Mode without touching text; w/e/b move visual selection', async () => fixture(async ({ document }) => {
   const pane = new DocumentPane(document, () => theme, () => 24, () => {}, () => true, () => {});
