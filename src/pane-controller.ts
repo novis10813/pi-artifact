@@ -18,18 +18,21 @@ export default function installPane(pi: ExtensionAPI, changed?: (ctx: ExtensionC
   const stop = () => { if (timer) clearInterval(timer); timer = undefined; };
   const detach = () => { stop(); view?.unmount(); view = undefined; context?.ui.setStatus("plan-pane", undefined); };
   const save = async (): Promise<boolean> => {
-    if (!document || saving) return false;
+    if (!document) return false;
+    if (saving) { view?.message("Save already in progress"); return false; }
     if (refreshing) { view?.message("Reading disk · run :w again shortly"); return false; }
     const target = document, targetView = view;
     saving = true;
     try {
       await target.save(withFileMutationQueue); targetView?.message("Saved · F6 chat / document");
       context?.ui.setStatus("plan-pane", "plan");
-      if (context) await changed?.(context);
-      return true;
     }
-    catch (error) { targetView?.message(errorText(error)); context?.ui.notify(errorText(error), "error"); return false; }
+    catch (error) { targetView?.message(errorText(error)); context?.ui.notify(errorText(error), "error"); saving = false; return false; }
+    // The file is written. A failing plan-sync hook is reported but does not turn this into a failed save.
+    try { if (context) await changed?.(context); }
+    catch (error) { context?.ui.notify(errorText(error), "error"); }
     finally { saving = false; }
+    return true;
   };
   const refresh = async () => {
     if (refreshing || saving || !document || !view) return;

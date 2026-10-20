@@ -48,38 +48,42 @@ export class DocumentBuffer {
     this.col = Math.max(0, Math.min(graphemes(this.lines[this.row]).length, this.col));
   }
   move(dr: number, dc: number): void { this.row += dr; this.col += dc; this.clamp(); }
-  private step(p: Position, forward: boolean): Position | undefined {
+  private step(p: Position, forward: boolean, cells: (row: number) => string[]): Position | undefined {
     if (forward) {
-      if (p.col < graphemes(this.lines[p.row]).length - 1) return { row: p.row, col: p.col + 1 };
+      if (p.col < cells(p.row).length - 1) return { row: p.row, col: p.col + 1 };
       return p.row < this.lines.length - 1 ? { row: p.row + 1, col: 0 } : undefined;
     }
     if (p.col > 0) return { row: p.row, col: p.col - 1 };
-    return p.row > 0 ? { row: p.row - 1, col: Math.max(0, graphemes(this.lines[p.row - 1]).length - 1) } : undefined;
+    return p.row > 0 ? { row: p.row - 1, col: Math.max(0, cells(p.row - 1).length - 1) } : undefined;
   }
   /** w/e/b and W/E/B. Words never span lines; an empty line is a stop for w and b. */
   word(motion: "w" | "e" | "b", big = false): void {
-    const at = (p: Position) => wordClass(graphemes(this.lines[p.row])[p.col], big);
-    let p: Position = { row: this.row, col: Math.min(this.col, Math.max(0, graphemes(this.lines[this.row]).length - 1)) };
+    // Segment each visited line once so long lines stay linear.
+    const cache = new Map<number, string[]>();
+    const cells = (row: number) => { let c = cache.get(row); if (!c) cache.set(row, c = graphemes(this.lines[row])); return c; };
+    const at = (p: Position) => wordClass(cells(p.row)[p.col], big);
+    const next = (p: Position, forward: boolean) => this.step(p, forward, cells);
+    let p: Position = { row: this.row, col: Math.min(this.col, Math.max(0, cells(this.row).length - 1)) };
     let n: Position | undefined;
     const run = (forward: boolean) => {
       const kind = at(p);
-      while ((n = this.step(p, forward)) && n.row === p.row && at(n) === kind) p = n;
+      while ((n = next(p, forward)) && n.row === p.row && at(n) === kind) p = n;
     };
     if (motion === "w") {
       if (at(p) > BLANK) run(true);
-      if ((n = this.step(p, true))) {
+      if ((n = next(p, true))) {
         p = n;
-        while (at(p) === BLANK && (n = this.step(p, true))) p = n;
+        while (at(p) === BLANK && (n = next(p, true))) p = n;
       }
     } else if (motion === "e") {
-      if (!(n = this.step(p, true))) return;
+      if (!(n = next(p, true))) return;
       p = n;
-      while (at(p) <= BLANK && (n = this.step(p, true))) p = n;
+      while (at(p) <= BLANK && (n = next(p, true))) p = n;
       run(true);
     } else {
-      if (!(n = this.step(p, false))) { this.col = 0; return; }
+      if (!(n = next(p, false))) { this.col = 0; return; }
       p = n;
-      while (at(p) === BLANK && (n = this.step(p, false))) p = n;
+      while (at(p) === BLANK && (n = next(p, false))) p = n;
       if (at(p) > BLANK) run(false);
     }
     this.row = p.row; this.col = p.col; this.clamp();
@@ -88,14 +92,23 @@ export class DocumentBuffer {
   search(query: string, forward = true): SearchResult {
     if (!query) return { found: false, wrapped: false };
     const text = this.text, here = this.offset({ row: this.row, col: this.col });
-    // Matches must start on a grapheme boundary, so "e" never lands inside a decomposed "é".
-    const boundaries = new Set<number>();
-    let offset = 0;
-    for (const g of graphemes(text)) { boundaries.add(offset); offset += g.length; }
-    boundaries.add(offset);
+    // Matches must start and end on grapheme boundaries, so "e" never lands inside a decomposed "é".
+    // Only lines containing a candidate are segmented.
+    const boundaries = new Map<number, Set<number>>();
+    const onBoundary = (offset: number) => {
+      const start = text.lastIndexOf("\n", offset - 1) + 1;
+      let set = boundaries.get(start);
+      if (!set) {
+        const end = text.indexOf("\n", start);
+        let at = start; set = new Set([start]);
+        for (const g of graphemes(text.slice(start, end < 0 ? text.length : end))) set.add(at += g.length);
+        boundaries.set(start, set);
+      }
+      return set.has(offset);
+    };
     const matches: number[] = [];
     for (let i = text.indexOf(query); i >= 0; i = text.indexOf(query, i + 1))
-      if (boundaries.has(i) && boundaries.has(i + query.length)) matches.push(i);
+      if (onBoundary(i) && onBoundary(i + query.length)) matches.push(i);
     if (!matches.length) return { found: false, wrapped: false };
     let target = forward ? matches.find(i => i > here) : matches.findLast(i => i < here);
     const wrapped = target === undefined;

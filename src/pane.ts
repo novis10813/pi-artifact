@@ -112,8 +112,11 @@ export class DocumentPane implements Component, Focusable {
     }
     if (this.prompt) {
       // The command line owns the IME cursor so CJK search text composes in place.
-      const text = safe(this.prompt.kind + this.prompt.text);
-      const fitted = truncateToWidth(text, Math.max(0, width - 3), "");
+      // Keep the tail visible: that is where typing and IME composition happen.
+      const room = Math.max(0, width - 3), chars = graphemes(safe(this.prompt.kind + this.prompt.text));
+      let fitted = chars.join("");
+      while (chars.length > 1 && visibleWidth(fitted) > room) { chars.splice(1, 1); fitted = chars[0] + "…" + chars.slice(2).join(""); }
+      fitted = truncateToWidth(fitted, room, "");
       output.push(frame(theme.fg("text", fitted) + (this.focused ? CURSOR_MARKER + renderFakeCursor(" ") : "")));
     } else {
       const status = `${b.mode.toUpperCase()} ${b.row + 1}:${b.col + 1}${this.document.conflict ? " CONFLICT" : ""} · ${this.message}`;
@@ -173,10 +176,11 @@ export class DocumentPane implements Component, Focusable {
       }
     } else {
       const key = decodeKittyPrintable(data) ?? data;
-      const command = this.pending + key; this.pending = "";
+      const pending = this.pending, command = pending + key; this.pending = "";
       if (command === "dd") b.yank(true);
       else if (command === "yy") b.yank();
       else if (command === "gg") { b.row = 0; b.clamp(); }
+      else if (pending) { /* Unsupported operator sequence such as dw: cancel it like Vim, never run the motion alone. */ }
       else if ((key === "d" || key === "y") && b.mode !== "visual" || key === "g") this.pending = key;
       else if ((key === ":" || key === "/") && b.mode === "normal") this.prompt = { kind: key, text: "" };
       else if (key === "w" || key === "e" || key === "b") b.word(key);

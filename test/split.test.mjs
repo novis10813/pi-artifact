@@ -85,6 +85,19 @@ test('bridge keeps chat and document text separate, routes F6 and emits one curs
   frame = renderLayoutFrame(f.active().layoutRoot, 160, 30, () => {});
   assert.equal(frame.lines.join('').split(tui.CURSOR_MARKER).length - 1, 1); view.unmount();
 }));
+test('Ctrl+C leaves document Insert Mode without reaching pi; other modes keep app.clear', async () => fixture(async f => {
+  const view = new SplitView(f.ctx, f.document, async () => true); view.mount();
+  let cleared = 0; f.editor().onAction('app.clear', () => cleared++);
+  f.editor().handleInput('chat'); f.editor().handleInput('\x03'); assert.equal(cleared, 1, 'left chat Ctrl+C unchanged');
+  f.editor().handleInput('\x1b[17~'); f.editor().handleInput('i'); f.editor().handleInput('x');
+  f.editor().handleInput('\x03');
+  assert.equal(cleared, 1); assert.equal(f.document.buffer.mode, 'normal');
+  assert.ok(f.document.buffer.text.startsWith('x# Plan')); assert.equal(f.editor().getText(), 'chat');
+  f.editor().handleInput(':'); f.editor().handleInput('\x03'); assert.equal(cleared, 1, 'command line cancel stays in pane');
+  f.editor().handleInput('\x03'); assert.equal(cleared, 2, 'normal-mode Ctrl+C reaches pi');
+  f.editor().handleInput('v'); f.editor().handleInput('\x03'); assert.equal(cleared, 3, 'visual-mode Ctrl+C reaches pi');
+  view.unmount();
+}));
 test('refuses competing editor and never clobbers another layout or factory on teardown', async () => fixture(async f => {
   const competitor = () => new agent.CustomEditor(f.surface, getEditorTheme(), keys);
   f.ctx.ui.setEditorComponent(competitor);
