@@ -58,7 +58,8 @@ export class PlanController {
       throw error;
     }
     if (revision === this.state.revision) return false;
-    this.set({ ...this.state, phase: "planning", revision, approval: undefined });
+    // A finished plan stays done after edits; only /plan revise reopens it.
+    this.set({ ...this.state, phase: this.state.phase === "done" ? "done" : "planning", revision, approval: undefined });
     return true;
   }
   async submit() {
@@ -80,7 +81,7 @@ export class PlanController {
     await this.sync(); this.set({ ...this.state, phase: "planning", approval: undefined });
   }
   finish() {
-    if (this.state.phase !== "executing") throw new Error("沒有正在實作的計畫，無法標記完成。先用 /plan approve 核准並開始實作。");
+    if (this.state.phase !== "executing") throw new Error(this.state.phase === "done" ? "計畫已標記完成。要再實作請先 /plan revise。" : "沒有正在實作的計畫，無法標記完成。先用 /plan approve 核准並開始實作。");
     this.set({ ...this.state, phase: "done" });
   }
   off() { const tools = this.state.previousTools; this.set({ v: 1, phase: "off" }); return tools; }
