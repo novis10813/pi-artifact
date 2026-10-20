@@ -69,7 +69,9 @@ export default function installPane(pi: ExtensionAPI, changed?: (ctx: ExtensionC
     if (ctx.mode !== "tui") throw new Error("Plan pane requires interactive fullscreen mode.");
     if (view?.attached) { if (focus) view.focusPlan(); return; }
     detach(); context = ctx; hidden = false;
-    const next = new SplitView(ctx, document, save, () => { if (document) hide(ctx); }, label);
+    // :wq hides only the document it saved, even if another one was opened meanwhile.
+    const owner = document;
+    const next = new SplitView(ctx, document, save, () => { if (document === owner) hide(ctx); }, label);
     next.mount(); view = next;
     ctx.ui.setStatus("plan-pane", `plan${document.dirty ? "*" : ""}`);
     timer = setInterval(() => { void refresh(); }, 500); timer.unref?.();

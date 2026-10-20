@@ -182,6 +182,11 @@ test('F7 and /plan-pane toggle hide and reshow the pane without saving, discardi
   await commands.get('plan-pane').handler('toggle', f.ctx); assert.equal(pane.hidden, false);
   await commands.get('plan-pane').handler('toggle', f.ctx); await commands.get('plan-pane').handler('discard', f.ctx);
   assert.equal(pane.hidden, false); assert.equal(pane.document, undefined);
+  await pane.open(f.path, f.ctx); pane.hide(f.ctx); pane.close(); assert.equal(pane.hidden, false, 'close() resets hidden');
+  await pane.open(f.path, f.ctx); pane.hide(f.ctx); assert.equal(events.get('session_before_switch')({}, f.ctx), undefined);
+  assert.equal(pane.hidden, false, 'navigation resets hidden');
+  await pane.open(f.path, f.ctx); pane.hide(f.ctx); await events.get('session_shutdown')({ reason: 'quit' }, f.ctx);
+  assert.equal(pane.hidden, false, 'shutdown resets hidden');
   await events.get('session_shutdown')({ reason: 'quit' }, f.ctx);
 }));
 test(':wq hides the pane only after a successful save', async () => fixture(async f => {
@@ -199,6 +204,17 @@ test(':wq hides the pane only after a successful save', async () => fixture(asyn
   assert.equal(pane.hidden, false, 'failed save keeps the pane open'); assert.equal(pane.dirty, true);
   await rm(f.path, { recursive: true });
 }));
+test(':wq hide is a no-op when its document was closed during plan sync', async () => fixture(async f => {
+  let release; const gate = new Promise(r => release = r);
+  const pane = extension({ registerCommand() {}, on() {} }, async () => { await gate; });
+  await pane.open(f.path, f.ctx);
+  f.editor().handleInput('\x1b[17~'); f.editor().handleInput('i'); f.editor().handleInput('Q'); f.editor().handleInput('\x1b');
+  for (const key of ':wq\r') f.editor().handleInput(key);
+  await new Promise(r => setTimeout(r, 50));
+  pane.close(); release(); await new Promise(r => setTimeout(r, 20));
+  assert.equal(pane.hidden, false); assert.equal(pane.document, undefined);
+  assert.ok(!f.notices.some(n => n.text === 'No document open.'));
+}));
 test('pane shows the plan phase bottom-right and keeps phase and dirty marker when narrow', async () => fixture(async f => {
   let phase = 'PLAN planning';
   const pane = extension({ registerCommand() {}, on() {} }, undefined, () => phase);
@@ -210,10 +226,10 @@ test('pane shows the plan phase bottom-right and keeps phase and dirty marker wh
   f.editor().handleInput('\x1b[17~'); f.editor().handleInput('i'); f.editor().handleInput('x');
   f.terminal.columns = 30; const top = tui.stripTerminalSequences(renderLayoutFrame(f.active().layoutRoot, 30, 20, () => {}).lines[0]);
   assert.ok(top.includes('[+]'), top);
-  for (const width of [5, 6, 7, 8]) {
+  for (const width of [3, 4, 5, 6, 7, 8]) {
     f.terminal.columns = width * 2;
     const line = tui.stripTerminalSequences(renderLayoutFrame(f.active().layoutRoot, width * 2, 20, () => {}).lines[0]);
-    assert.ok(line.includes('[+]'), `dirty marker at pane width ${width}: ${line}`);
+    assert.ok(line.includes(width < 5 ? '+' : '[+]'), `dirty marker at pane width ${width}: ${line}`);
   }
   assert.ok(!f.statuses.has('plan-mode'));
 }));

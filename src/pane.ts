@@ -97,7 +97,8 @@ export class DocumentPane implements Component, Focusable {
     };
     // Narrow panes truncate the file name first; the unsaved marker stays visible.
     const dirty = this.document.dirty ? " [+] " : " ", name = width - 3 - visibleWidth(dirty);
-    const top = truncateToWidth(name > 0 ? " " + truncateToWidth(safe(basename(this.document.path)), name, "…") + dirty : dirty.trim(), width - 2, "");
+    const marker = width - 2 >= 3 ? dirty.trim() : this.document.dirty ? "+" : "";
+    const top = truncateToWidth(name > 0 ? " " + truncateToWidth(safe(basename(this.document.path)), name, "…") + dirty : marker, width - 2, "");
     const output = [border("┌" + top + "─".repeat(Math.max(0, width - 2 - visibleWidth(top))) + "┐")];
     for (let i = 0; i < this.bodyHeight; i++) {
       const line = this.visual[this.top + i];
