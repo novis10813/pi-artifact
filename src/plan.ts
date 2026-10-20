@@ -54,7 +54,8 @@ export class PlanController {
     let revision: string;
     try { revision = (await this.store.read(this.state.artifactId!)).revision; }
     catch (error) {
-      if (this.state.phase !== "planning" || this.state.approval) this.set({ ...this.state, phase: "planning", approval: undefined });
+      const phase = this.state.phase === "done" ? "done" : "planning";
+      if (this.state.phase !== phase || this.state.approval) this.set({ ...this.state, phase, approval: undefined });
       throw error;
     }
     if (revision === this.state.revision) return false;
@@ -100,6 +101,6 @@ export class PlanController {
     if (!this.active) return "";
     return `Plan Mode: ${this.state.phase}. Active plan ${this.state.artifactId}, revision ${this.state.revision}. ${this.state.phase === "executing"
       ? "Implement only this approved revision. Reuse existing task, verification and reviewer tools. Plan content changes revoke permission before the next tool call."
-      : "Do not implement project changes or run shells/delegation/codemode. Explore with read/grep/find/ls/web tools. Read and update the SAME artifact using read_artifact/edit_artifact/replace_artifact, not a new plan per reply. Save is not approval. Keep answering questions and revising during review; any edit returns the plan to planning and invalidates earlier review conclusions. When ready call request_plan_review and end your turn. Only the user's /plan approve authorizes execution; it approves this exact revision and starts implementation."}`;
+      : "Do not implement project changes or run shells/delegation/codemode. Explore with read/grep/find/ls/web tools. Read and update the SAME artifact using read_artifact/edit_artifact/replace_artifact, not a new plan per reply. Save is not approval. " + (this.state.phase === "done" ? "This plan is done; edits do not reopen it, only the user's /plan revise does." : "Keep answering questions and revising during review; any edit returns the plan to planning and invalidates earlier review conclusions.") + " When ready call request_plan_review and end your turn. Only the user's /plan approve authorizes execution; it approves this exact revision and starts implementation."}`;
   }
 }

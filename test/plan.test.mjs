@@ -13,7 +13,7 @@ async function fixture(fn) {
   try { const a = await store.create('# Plan'); await fn({ cwd, store, entries, plan, a }); }
   finally { await rm(cwd, { recursive: true, force: true }); }
 }
-test('approve grants execution for the exact revision in one step; review is optional', () => fixture(async ({ plan, a, store }) => {
+test('approve grants execution for the exact revision in one step; review is optional', () => fixture(async ({ plan, a, store, cwd }) => {
   await plan.enter(a.record.id, ['read', 'bash']);
   assert.ok(await plan.block('bash', {}));
   await assert.rejects(plan.approve('0'.repeat(64)), /已變更/); assert.equal(plan.state.phase, 'planning');
@@ -24,8 +24,13 @@ test('approve grants execution for the exact revision in one step; review is opt
   plan.finish(); assert.ok(await plan.block('write', {})); await assert.rejects(plan.approve(a.revision), /計畫已完成/); await assert.rejects(plan.submit(), /計畫已完成/);
   assert.throws(() => plan.finish(), /已標記完成.*\/plan revise/);
   const edited = await store.update(a.record.id, c => c + '\nafter done');
+  assert.ok(await plan.block('write', {})); assert.equal(plan.state.revision, edited.revision); assert.equal(plan.state.approval, undefined); assert.match(plan.prompt(), /only the user's \/plan revise/);
   await assert.rejects(plan.approve(edited.revision), /計畫已完成/); await assert.rejects(plan.submit(), /計畫已完成/); assert.equal(plan.state.phase, 'done');
-  await plan.revise(); await plan.approve(edited.revision); assert.equal(plan.state.phase, 'executing'); plan.finish();
+  const saved = await store.read(a.record.id); await rm(join(cwd, a.record.path));
+  assert.match(await plan.block('write', {}), /unreadable/); assert.equal(plan.state.phase, 'done');
+  await writeFile(join(cwd, a.record.path), saved.content); await plan.sync();
+  await assert.rejects(plan.approve(plan.state.revision), /計畫已完成/);
+  await plan.revise(); await plan.approve(plan.state.revision); assert.equal(plan.state.phase, 'executing'); plan.finish();
   assert.deepEqual(plan.off(), ['read', 'bash']); assert.equal(await plan.block('bash', {}), undefined);
   await plan.enter(a.record.id, []); await plan.submit(); await plan.approve(plan.state.revision); assert.equal(plan.state.phase, 'executing');
 }));

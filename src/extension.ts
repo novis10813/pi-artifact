@@ -178,7 +178,7 @@ export default function (pi: ExtensionAPI): void {
     { name: "review", description: "選用：提交目前版本供審查，不是執行授權", blocked: () => !plan?.active ? "沒有進行中的計畫" : plan.state.phase === "executing" ? "實作進行中" : plan.state.phase === "done" ? "計畫已完成" : undefined },
     { name: "approve", description: "核准目前已儲存的版本並立即開始實作", blocked: () => !plan?.active ? "沒有進行中的計畫" : ["planning", "review"].includes(plan.state.phase) ? (pane.dirty ? "右側有未儲存編輯" : undefined) : plan.state.phase === "executing" ? "已在實作中" : "計畫已完成" },
     { name: "revise", description: "回到規劃，撤銷執行授權", blocked: () => plan?.active ? undefined : "沒有進行中的計畫" },
-    { name: "done", description: "標記實作完成，再次封鎖寫入", blocked: () => plan?.state.phase === "executing" ? undefined : "沒有正在實作的計畫" },
+    { name: "done", description: "標記實作完成，再次封鎖寫入", blocked: () => plan?.state.phase === "executing" ? undefined : plan?.state.phase === "done" ? "計畫已完成，要再實作請先 /plan revise" : "沒有正在實作的計畫" },
     { name: "off", description: "退出 Plan Mode 並恢復原本工具權限", blocked: () => plan?.active ? undefined : "沒有進行中的計畫" },
     { name: "use", description: "<artifact-id> 以既有 artifact 開始規劃", blocked: () => plan?.active ? "已有進行中的計畫" : undefined },
   ];
