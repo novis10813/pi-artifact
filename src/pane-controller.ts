@@ -23,8 +23,8 @@ export default function installPane(pi: ExtensionAPI, changed?: (ctx: ExtensionC
     if (refreshing) { view?.message("Reading disk · run :w again shortly"); return false; }
     const target = document, targetView = view;
     const report = (error: unknown) => {
-      try { targetView?.message(errorText(error)); context?.ui.notify(errorText(error), "error"); }
-      catch { /* stale view or context: nothing left to report to */ }
+      try { targetView?.message(errorText(error)); } catch { /* detached view */ }
+      try { context?.ui.notify(errorText(error), "error"); } catch { /* stale context */ }
     };
     saving = true;
     try {
