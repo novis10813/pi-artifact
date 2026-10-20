@@ -17,17 +17,18 @@ export default function installPane(pi: ExtensionAPI, changed?: (ctx: ExtensionC
   const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
   const stop = () => { if (timer) clearInterval(timer); timer = undefined; };
   const detach = () => { stop(); view?.unmount(); view = undefined; context?.ui.setStatus("plan-pane", undefined); };
-  const save = async () => {
-    if (!document || saving) return;
-    if (refreshing) { view?.message("Reading disk · press Ctrl+S again shortly"); return; }
+  const save = async (): Promise<boolean> => {
+    if (!document || saving) return false;
+    if (refreshing) { view?.message("Reading disk · run :w again shortly"); return false; }
     const target = document, targetView = view;
     saving = true;
     try {
       await target.save(withFileMutationQueue); targetView?.message("Saved · F6 chat / document");
       context?.ui.setStatus("plan-pane", "plan");
       if (context) await changed?.(context);
+      return true;
     }
-    catch (error) { targetView?.message(errorText(error)); context?.ui.notify(errorText(error), "error"); }
+    catch (error) { targetView?.message(errorText(error)); context?.ui.notify(errorText(error), "error"); return false; }
     finally { saving = false; }
   };
   const refresh = async () => {
@@ -59,7 +60,7 @@ export default function installPane(pi: ExtensionAPI, changed?: (ctx: ExtensionC
     if (ctx.mode !== "tui") throw new Error("Plan pane requires interactive fullscreen mode.");
     if (view?.attached) { if (focus) view.focusPlan(); return; }
     detach(); context = ctx;
-    const next = new SplitView(ctx, document, () => { void save(); });
+    const next = new SplitView(ctx, document, save);
     next.mount(); view = next;
     ctx.ui.setStatus("plan-pane", `plan${document.dirty ? "*" : ""}`);
     timer = setInterval(() => { void refresh(); }, 500); timer.unref?.();

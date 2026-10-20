@@ -31,7 +31,7 @@ export class SplitView {
   private pane?: DocumentPane;
   readonly factory: EditorFactory;
 
-  constructor(private ctx: ExtensionContext, readonly document: DocumentSession, save: () => void) {
+  constructor(private ctx: ExtensionContext, readonly document: DocumentSession, save: () => Promise<boolean>) {
     const owner = this;
     this.factory = (surface, theme, keys) => {
       if (!isViewportTUI(surface)) throw new Error("Plan pane requires fullscreen mode.");
@@ -44,7 +44,9 @@ export class SplitView {
         handleInput(data: string): void {
           if (matchesKey(data, "f6")) { owner.right = !owner.right; surface.requestRender(); return; }
           if (owner.right) {
-            // App clear/exit/suspend still work. Esc belongs to document modal editing.
+            // Ctrl+C leaves Insert Mode or the command line first. Otherwise app
+            // clear/exit/suspend still work. Esc belongs to document modal editing.
+            if (keys.matches(data, "app.clear") && owner.pane!.interrupt()) return;
             if (keys.matches(data, "app.clear") || keys.matches(data, "app.exit") || keys.matches(data, "app.suspend")) super.handleInput(data);
             else owner.pane!.handleInput(data);
           } else super.handleInput(data);

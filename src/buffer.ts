@@ -2,6 +2,19 @@ const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 export const graphemes = (text: string): string[] => Array.from(segmenter.segment(text), s => s.segment);
 type Snapshot = { text: string; row: number; col: number };
 export type Position = { row: number; col: number };
+export type SearchResult = { found: boolean; wrapped: boolean };
+
+const BLANK = 0, EMPTY = -1;
+// Vim-like word classes: blank, keyword, punctuation, CJK, emoji. WORDs only split on blanks.
+function wordClass(g: string | undefined, big: boolean): number {
+  if (g === undefined) return EMPTY;
+  if (/^\s/.test(g)) return BLANK;
+  if (big) return 1;
+  if (/\p{Extended_Pictographic}/u.test(g)) return 4;
+  if (/^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(g)) return 3;
+  if (/^[\p{L}\p{N}\p{M}_]/u.test(g)) return 1;
+  return 2;
+}
 
 /** Small document buffer. Columns count graphemes, never UTF-16 code units. */
 export class DocumentBuffer {
@@ -35,6 +48,62 @@ export class DocumentBuffer {
     this.col = Math.max(0, Math.min(graphemes(this.lines[this.row]).length, this.col));
   }
   move(dr: number, dc: number): void { this.row += dr; this.col += dc; this.clamp(); }
+  private step(p: Position, forward: boolean): Position | undefined {
+    if (forward) {
+      if (p.col < graphemes(this.lines[p.row]).length - 1) return { row: p.row, col: p.col + 1 };
+      return p.row < this.lines.length - 1 ? { row: p.row + 1, col: 0 } : undefined;
+    }
+    if (p.col > 0) return { row: p.row, col: p.col - 1 };
+    return p.row > 0 ? { row: p.row - 1, col: Math.max(0, graphemes(this.lines[p.row - 1]).length - 1) } : undefined;
+  }
+  /** w/e/b and W/E/B. Words never span lines; an empty line is a stop for w and b. */
+  word(motion: "w" | "e" | "b", big = false): void {
+    const at = (p: Position) => wordClass(graphemes(this.lines[p.row])[p.col], big);
+    let p: Position = { row: this.row, col: Math.min(this.col, Math.max(0, graphemes(this.lines[this.row]).length - 1)) };
+    let n: Position | undefined;
+    const run = (forward: boolean) => {
+      const kind = at(p);
+      while ((n = this.step(p, forward)) && n.row === p.row && at(n) === kind) p = n;
+    };
+    if (motion === "w") {
+      if (at(p) > BLANK) run(true);
+      if ((n = this.step(p, true))) {
+        p = n;
+        while (at(p) === BLANK && (n = this.step(p, true))) p = n;
+      }
+    } else if (motion === "e") {
+      if (!(n = this.step(p, true))) return;
+      p = n;
+      while (at(p) <= BLANK && (n = this.step(p, true))) p = n;
+      run(true);
+    } else {
+      if (!(n = this.step(p, false))) { this.col = 0; return; }
+      p = n;
+      while (at(p) === BLANK && (n = this.step(p, false))) p = n;
+      if (at(p) > BLANK) run(false);
+    }
+    this.row = p.row; this.col = p.col; this.clamp();
+  }
+  /** Case-sensitive literal search from the cursor, wrapping around the document. */
+  search(query: string, forward = true): SearchResult {
+    if (!query) return { found: false, wrapped: false };
+    const text = this.text, here = this.offset({ row: this.row, col: this.col });
+    // Matches must start on a grapheme boundary, so "e" never lands inside a decomposed "é".
+    const boundaries = new Set<number>();
+    let offset = 0;
+    for (const g of graphemes(text)) { boundaries.add(offset); offset += g.length; }
+    boundaries.add(offset);
+    const matches: number[] = [];
+    for (let i = text.indexOf(query); i >= 0; i = text.indexOf(query, i + 1))
+      if (boundaries.has(i) && boundaries.has(i + query.length)) matches.push(i);
+    if (!matches.length) return { found: false, wrapped: false };
+    let target = forward ? matches.find(i => i > here) : matches.findLast(i => i < here);
+    const wrapped = target === undefined;
+    target ??= forward ? matches[0] : matches.at(-1)!;
+    const before = text.slice(0, target).split("\n");
+    this.row = before.length - 1; this.col = graphemes(before.at(-1)!).length; this.clamp();
+    return { found: true, wrapped };
+  }
   home(): void { this.col = 0; }
   end(): void { this.col = graphemes(this.lines[this.row]).length; }
   insert(text: string): void {

@@ -77,13 +77,13 @@ with tempfile.TemporaryDirectory(prefix="pi-artifact-pty-") as directory:
         command("/plan-pane open plan.md")
         expect(b"plan.md")
         expect(b"F6 focus")
-        # Switch to document, insert literal CJK and paste content, normal mode, save.
+        # Switch to document, insert literal CJK and paste content, Ctrl+C to normal mode, :w.
         os.write(master, b"\x1b[17~")
         os.write(master, b"i")
         os.write(master, b"\x1b[200~" + "新增中文 ".encode() + b"\x1b[201~")
-        os.write(master, b"\x1b")
+        os.write(master, b"\x03")
         pump(0.15)
-        os.write(master, b"\x13")
+        os.write(master, b":w\r")
         pump(0.8)
         assert plan.read_text().startswith("新增中文 # Plan"), "Right-pane editing or save failed"
         # Chat input must not modify the plan or be submitted to a model.

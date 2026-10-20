@@ -15,6 +15,8 @@ export class DocumentPane implements Component, Focusable {
   private top = 0;
   private followCursor = true;
   private pending = "";
+  private prompt?: { kind: ":" | "/"; text: string };
+  private lastSearch = "";
   private pasteBuffer?: string;
   private cachedText?: string;
   private cachedWidth = -1;
@@ -23,8 +25,33 @@ export class DocumentPane implements Component, Focusable {
   private gutter = 0;
 
   constructor(readonly document: DocumentSession, private theme: () => Theme,
-    private height: () => number, private redraw: () => void, private save: () => void,
-    private focus: () => void) {}
+    private height: () => number, private redraw: () => void, private save: () => Promise<boolean> | boolean | void,
+    private focus: () => void, private hide: () => void = () => {}) {}
+  /** Ctrl+C: cancel the command line or leave Insert Mode. Returns false when it is not ours. */
+  interrupt(): boolean {
+    if (this.prompt) this.prompt = undefined;
+    else if (this.document.buffer.mode === "insert") this.document.buffer.normal();
+    else return false;
+    this.redraw(); return true;
+  }
+  private run(kind: ":" | "/", text: string): void {
+    const b = this.document.buffer;
+    if (kind === "/") {
+      if (text) this.lastSearch = text;
+      this.find(true); return;
+    }
+    const command = text.trim();
+    if (command === "w") void this.save();
+    else if (command === "wq") void Promise.resolve(this.save()).then(ok => { if (ok) this.hide(); });
+    else if (command) this.message = `Not an editor command: ${command}`;
+    b.normal();
+  }
+  private find(forward: boolean): void {
+    if (!this.lastSearch) { this.message = "No previous search"; return; }
+    const result = this.document.buffer.search(this.lastSearch, forward);
+    this.message = !result.found ? `Pattern not found: ${this.lastSearch}`
+      : `/${this.lastSearch}${result.wrapped ? (forward ? " · wrapped to top" : " · wrapped to bottom") : ""}`;
+  }
   invalidate(): void { this.cachedText = undefined; }
   private layout(width: number): void {
     const b = this.document.buffer;
@@ -78,14 +105,21 @@ export class DocumentPane implements Component, Focusable {
       for (const cell of line.cells) {
         let displayed = cell.text;
         if (range && cell.offset >= range[0] && cell.offset < range[1]) displayed = theme.bg("selectedBg", displayed);
-        if (this.focused && line.row === b.row && cell.col === b.col) displayed = CURSOR_MARKER + renderFakeCursor(displayed);
+        if (this.focused && !this.prompt && line.row === b.row && cell.col === b.col) displayed = CURSOR_MARKER + renderFakeCursor(displayed);
         text += displayed;
       }
       output.push(frame(text));
     }
-    const status = `${b.mode.toUpperCase()} ${b.row + 1}:${b.col + 1}${this.document.conflict ? " CONFLICT" : ""} · ${this.message}`;
-    output.push(frame(theme.fg(this.document.conflict ? "warning" : "muted", safe(status))));
-    const hint = truncateToWidth(" F6 focus · i edit · Esc normal · Ctrl+S save ", width - 2, "");
+    if (this.prompt) {
+      // The command line owns the IME cursor so CJK search text composes in place.
+      const text = safe(this.prompt.kind + this.prompt.text);
+      const fitted = truncateToWidth(text, Math.max(0, width - 3), "");
+      output.push(frame(theme.fg("text", fitted) + (this.focused ? CURSOR_MARKER + renderFakeCursor(" ") : "")));
+    } else {
+      const status = `${b.mode.toUpperCase()} ${b.row + 1}:${b.col + 1}${this.document.conflict ? " CONFLICT" : ""} · ${this.message}`;
+      output.push(frame(theme.fg(this.document.conflict ? "warning" : "muted", safe(status))));
+    }
+    const hint = truncateToWidth(" F6 focus ", width - 2, "");
     output.push(border("└" + hint + "─".repeat(Math.max(0, width - 2 - visibleWidth(hint))) + "┘"));
     return output;
   }
@@ -98,13 +132,27 @@ export class DocumentPane implements Component, Focusable {
       if (end >= 0) {
         const pasted = this.pasteBuffer.slice(0, end).replace("\x1b[200~", "");
         const remaining = this.pasteBuffer.slice(end + 6); this.pasteBuffer = undefined;
-        b.insert(pasted.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, ""));
+        if (this.prompt) this.prompt.text += pasted.replace(/[\x00-\x1f\x7f]/g, "");
+        else b.insert(pasted.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, ""));
         if (remaining) this.handleInput(remaining);
       }
       this.followCursor = true; this.redraw(); return;
     }
-    if (matchesKey(data, "ctrl+s")) { this.save(); return; }
+    if (matchesKey(data, "ctrl+c")) { this.interrupt(); return; }
     this.followCursor = true;
+    if (this.prompt) {
+      const prompt = this.prompt;
+      if (matchesKey(data, "escape")) this.prompt = undefined;
+      else if (matchesKey(data, "enter")) { this.prompt = undefined; this.run(prompt.kind, prompt.text); }
+      else if (matchesKey(data, "backspace")) {
+        if (!prompt.text) this.prompt = undefined;
+        else prompt.text = graphemes(prompt.text).slice(0, -1).join("");
+      } else {
+        const printable = decodeKittyPrintable(data) ?? (data && !/[\x00-\x1f\x7f]/.test(data) ? data : undefined);
+        if (printable) prompt.text += printable;
+      }
+      this.redraw(); return;
+    }
     if (matchesKey(data, "escape")) { b.normal(); this.pending = ""; }
     else if (matchesKey(data, "up")) b.move(-1, 0);
     else if (matchesKey(data, "down")) b.move(1, 0);
@@ -130,6 +178,10 @@ export class DocumentPane implements Component, Focusable {
       else if (command === "yy") b.yank();
       else if (command === "gg") { b.row = 0; b.clamp(); }
       else if ((key === "d" || key === "y") && b.mode !== "visual" || key === "g") this.pending = key;
+      else if ((key === ":" || key === "/") && b.mode === "normal") this.prompt = { kind: key, text: "" };
+      else if (key === "w" || key === "e" || key === "b") b.word(key);
+      else if (key === "W" || key === "E" || key === "B") b.word(key.toLowerCase() as "w" | "e" | "b", true);
+      else if (key === "n" || key === "N") this.find(key === "n");
       else if (key === "h") b.move(0, -1);
       else if (key === "j") b.move(1, 0);
       else if (key === "k") b.move(-1, 0);

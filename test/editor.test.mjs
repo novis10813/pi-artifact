@@ -90,7 +90,80 @@ test('pane implements normal/insert, dd/yy/p, visual yank, undo/redo, and save',
   pane.handleInput('u'); pane.handleInput('\x12'); assert.ok(document.buffer.text.startsWith('中文👩‍💻'));
   pane.handleInput('y'); pane.handleInput('y'); pane.handleInput('p'); assert.equal(document.buffer.row, 1);
   pane.handleInput('d'); pane.handleInput('d'); assert.equal(document.buffer.row, 1);
-  pane.handleInput('\x13'); assert.equal(saved, 1);
+  pane.handleInput('\x13'); assert.equal(saved, 0, 'Ctrl+S is no longer bound');
+  for (const key of ':w\r') pane.handleInput(key); assert.equal(saved, 1);
+}));
+const at = b => [b.row, b.col];
+test('w/e/b split keyword, punctuation, CJK and emoji runs across lines', () => {
+  const b = new DocumentBuffer('foo.bar  中文abc 👩‍💻👩‍💻\n\n  baz');
+  const w = () => { b.word('w'); return at(b); };
+  assert.deepEqual([w(), w(), w(), w(), w(), w(), w()], [[0, 3], [0, 4], [0, 9], [0, 11], [0, 15], [1, 0], [2, 2]]);
+  assert.deepEqual(w(), [2, 4], 'w on the last word stops on its last character');
+  const back = []; for (let i = 0; i < 7; i++) { b.word('b'); back.push(at(b)); }
+  assert.deepEqual(back, [[2, 2], [1, 0], [0, 15], [0, 11], [0, 9], [0, 4], [0, 3]]);
+  b.row = 0; b.col = 0; const ends = []; for (let i = 0; i < 6; i++) { b.word('e'); ends.push(at(b)); }
+  assert.deepEqual(ends, [[0, 2], [0, 3], [0, 6], [0, 10], [0, 13], [0, 16]]);
+  b.word('e'); assert.deepEqual(at(b), [2, 4], 'e skips blank and empty lines');
+  b.word('b'); b.word('b'); assert.deepEqual(at(b), [1, 0]);
+  b.row = 0; b.col = 0; b.word('b'); assert.deepEqual(at(b), [0, 0]);
+  assert.equal(b.text, 'foo.bar  中文abc 👩‍💻👩‍💻\n\n  baz');
+});
+test('W/E/B only split on whitespace', () => {
+  const b = new DocumentBuffer('a.b,c 中文!x\n  y');
+  b.word('w', true); assert.deepEqual(at(b), [0, 6]); b.word('w', true); assert.deepEqual(at(b), [1, 2]);
+  b.word('b', true); assert.deepEqual(at(b), [0, 6]); b.word('e', true); assert.deepEqual(at(b), [0, 9]);
+  b.row = 0; b.col = 0; b.word('e', true); assert.deepEqual(at(b), [0, 4]);
+});
+test('literal search is case-sensitive, CJK aware, wraps, and respects graphemes', () => {
+  const b = new DocumentBuffer('Plan plan\n計畫計畫\nplan');
+  assert.deepEqual(b.search('plan'), { found: true, wrapped: false }); assert.deepEqual(at(b), [0, 5]);
+  b.search('plan'); assert.deepEqual(at(b), [2, 0]);
+  assert.deepEqual(b.search('plan'), { found: true, wrapped: true }); assert.deepEqual(at(b), [0, 5]);
+  assert.deepEqual(b.search('plan', false), { found: true, wrapped: true }); assert.deepEqual(at(b), [2, 0]);
+  b.search('計畫', false); assert.deepEqual(at(b), [1, 2]);
+  assert.deepEqual(b.search('Missing'), { found: false, wrapped: false }); assert.deepEqual(at(b), [1, 2]);
+  const d = new DocumentBuffer('cafe\u0301 e'); d.col = 0;
+  d.search('e'); assert.deepEqual(at(d), [0, 5], 'never stops inside a combining sequence');
+});
+test('pane :w/:wq save and hide only after success; unknown commands are harmless', async () => fixture(async ({ document }) => {
+  let ok = false, saved = 0, hidden = 0;
+  const pane = new DocumentPane(document, () => theme, () => 24, () => {}, async () => { saved++; return ok; }, () => {}, () => hidden++);
+  const type = text => { for (const key of text) pane.handleInput(key); };
+  const before = document.buffer.text;
+  type(':wq\r'); await new Promise(r => setImmediate(r)); assert.deepEqual([saved, hidden], [1, 0], 'failed save keeps pane');
+  ok = true; type(':wq\r'); await new Promise(r => setImmediate(r)); assert.deepEqual([saved, hidden], [2, 1]);
+  type(':q!\r'); assert.equal(saved, 2); assert.ok(plain(pane.render(60).join('\n')).includes('Not an editor command: q!'));
+  type(':wx'); pane.handleInput('\x7f'); pane.handleInput('\x7f'); pane.handleInput('\x7f'); pane.handleInput('\x7f');
+  type(':w'); pane.handleInput('\x1b'); type(':w'); assert.equal(pane.interrupt(), true); pane.handleInput('\r');
+  assert.equal(saved, 2); assert.equal(document.buffer.text, before); assert.equal(document.dirty, false);
+  assert.equal(document.buffer.mode, 'normal');
+}));
+test('pane / search, n/N, cancel, and command line owns the IME cursor', async () => fixture(async ({ document }) => {
+  document.buffer.replace('一段文字\n第二段文字\nend'); const dirty = document.dirty;
+  const pane = new DocumentPane(document, () => theme, () => 24, () => {}, () => true, () => {});
+  pane.focused = true;
+  pane.handleInput('/'); pane.handleInput('\x1b[200~文字\x1b[201~');
+  const lines = pane.render(60); assert.equal(lines.join('').split(tui.CURSOR_MARKER).length - 1, 1);
+  assert.ok(lines.find(line => line.includes(tui.CURSOR_MARKER)).includes('/文字'));
+  pane.handleInput('\r'); assert.deepEqual(at(document.buffer), [0, 2]);
+  pane.handleInput('n'); assert.deepEqual(at(document.buffer), [1, 3]);
+  pane.handleInput('n'); assert.deepEqual(at(document.buffer), [0, 2]); assert.ok(pane.message.includes('wrapped'));
+  pane.handleInput('N'); assert.deepEqual(at(document.buffer), [1, 3]);
+  for (const key of '/none') pane.handleInput(key); pane.handleInput('\x03'); assert.deepEqual(at(document.buffer), [1, 3]);
+  for (const key of '/none\r') pane.handleInput(key); assert.deepEqual(at(document.buffer), [1, 3]);
+  assert.equal(pane.message, 'Pattern not found: none');
+  assert.equal(document.buffer.text, '一段文字\n第二段文字\nend'); assert.equal(document.dirty, dirty);
+}));
+test('Ctrl+C leaves Insert Mode without touching text; w/e/b move visual selection', async () => fixture(async ({ document }) => {
+  const pane = new DocumentPane(document, () => theme, () => 24, () => {}, () => true, () => {});
+  pane.handleInput('i'); pane.handleInput('x'); pane.handleInput('\x03');
+  assert.equal(document.buffer.mode, 'normal'); assert.ok(document.buffer.text.startsWith('x# Plan'));
+  assert.equal(pane.interrupt(), false, 'normal-mode Ctrl+C is left to pi');
+  document.buffer.replace('alpha beta gamma'); document.buffer.col = 0;
+  pane.handleInput('v'); pane.handleInput('w'); pane.handleInput('e');
+  assert.equal(document.buffer.text.slice(...document.buffer.selection()), 'alpha beta');
+  pane.handleInput('b'); assert.equal(document.buffer.text.slice(...document.buffer.selection()), 'alpha b');
+  pane.handleInput('i'); pane.handleInput('w'); assert.equal(document.buffer.text, 'alpha wbeta gamma');
 }));
 test('bracketed paste is literal even in normal mode and can span input chunks', async () => fixture(async ({ document }) => {
   const pane = new DocumentPane(document, () => theme, () => 24, () => {}, () => {}, () => {});
