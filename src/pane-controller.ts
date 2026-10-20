@@ -69,7 +69,7 @@ export default function installPane(pi: ExtensionAPI, changed?: (ctx: ExtensionC
     if (ctx.mode !== "tui") throw new Error("Plan pane requires interactive fullscreen mode.");
     if (view?.attached) { if (focus) view.focusPlan(); return; }
     detach(); context = ctx; hidden = false;
-    const next = new SplitView(ctx, document, save, () => hide(ctx), label);
+    const next = new SplitView(ctx, document, save, () => { if (document) hide(ctx); }, label);
     next.mount(); view = next;
     ctx.ui.setStatus("plan-pane", `plan${document.dirty ? "*" : ""}`);
     timer = setInterval(() => { void refresh(); }, 500); timer.unref?.();
@@ -82,6 +82,7 @@ export default function installPane(pi: ExtensionAPI, changed?: (ctx: ExtensionC
     ctx.ui.notify(`Plan pane hidden${document.dirty ? " · unsaved draft kept" : ""} · F7 or /plan-pane toggle to show`, "info");
   };
   const toggle = (ctx: ExtensionContext) => {
+    if (!document) throw new Error("No plan pane open. Start with /plan <goal> or /plan-pane open <path.md>.");
     if (saving || refreshing) throw new Error("Document I/O in progress. Try again shortly.");
     if (view?.attached) hide(ctx); else show(ctx, false);
   };
@@ -131,7 +132,7 @@ export default function installPane(pi: ExtensionAPI, changed?: (ctx: ExtensionC
       ctx.ui.notify("Save/copy/discard the plan-pane draft before changing sessions or branches.", "warning");
       return { cancel: true };
     }
-    detach(); document = undefined;
+    detach(); document = undefined; hidden = false;
     return undefined;
   };
   pi.on("session_before_switch", beforeNavigation);
@@ -151,7 +152,7 @@ export default function installPane(pi: ExtensionAPI, changed?: (ctx: ExtensionC
         process.stderr.write(`pi-artifact: unsaved draft recovery failed: ${errorText(error)}\n`);
       }
     }
-    detach(); document = undefined;
+    detach(); document = undefined; hidden = false;
   });
   return { open, show, hide, toggle, save, refresh,
     repaint() { view?.repaint(); },
@@ -159,6 +160,6 @@ export default function installPane(pi: ExtensionAPI, changed?: (ctx: ExtensionC
     get document() { return document; },
     get busy() { return saving || refreshing; },
     get dirty() { return document?.dirty ?? false; },
-    close() { if (document?.dirty) throw new Error("Unsaved draft. Save/copy/discard it first."); detach(); document = undefined; },
+    close() { if (document?.dirty) throw new Error("Unsaved draft. Save/copy/discard it first."); detach(); document = undefined; hidden = false; },
   };
 }

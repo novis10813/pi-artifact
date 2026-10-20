@@ -158,6 +158,7 @@ test('F7 and /plan-pane toggle hide and reshow the pane without saving, discardi
   const commands = new Map(), shortcuts = new Map(), events = new Map();
   const pane = extension({ registerCommand: (n, spec) => commands.set(n, spec), registerShortcut: (k, spec) => shortcuts.set(k, spec), on: (n, h) => events.set(n, h) });
   assert.deepEqual([...shortcuts.keys()], ['f7']);
+  shortcuts.get('f7').handler(f.ctx); assert.match(f.notices.at(-1).text, /No plan pane open\. Start with \/plan <goal>/);
   // pi forwards extension shortcuts to custom editors through onExtensionShortcut.
   const bind = () => { f.editor().onExtensionShortcut = data => data === '\x1b[18~' ? (shortcuts.get('f7').handler(f.ctx), true) : false; };
   await pane.open(f.path, f.ctx); bind();
@@ -179,6 +180,8 @@ test('F7 and /plan-pane toggle hide and reshow the pane without saving, discardi
   assert.equal(pane.document.buffer.mode, 'insert'); assert.equal(f.editor().getText(), 'chat');
   await commands.get('plan-pane').handler('toggle', f.ctx); assert.equal(pane.hidden, true);
   await commands.get('plan-pane').handler('toggle', f.ctx); assert.equal(pane.hidden, false);
+  await commands.get('plan-pane').handler('toggle', f.ctx); await commands.get('plan-pane').handler('discard', f.ctx);
+  assert.equal(pane.hidden, false); assert.equal(pane.document, undefined);
   await events.get('session_shutdown')({ reason: 'quit' }, f.ctx);
 }));
 test(':wq hides the pane only after a successful save', async () => fixture(async f => {
@@ -207,6 +210,11 @@ test('pane shows the plan phase bottom-right and keeps phase and dirty marker wh
   f.editor().handleInput('\x1b[17~'); f.editor().handleInput('i'); f.editor().handleInput('x');
   f.terminal.columns = 30; const top = tui.stripTerminalSequences(renderLayoutFrame(f.active().layoutRoot, 30, 20, () => {}).lines[0]);
   assert.ok(top.includes('[+]'), top);
+  for (const width of [5, 6, 7, 8]) {
+    f.terminal.columns = width * 2;
+    const line = tui.stripTerminalSequences(renderLayoutFrame(f.active().layoutRoot, width * 2, 20, () => {}).lines[0]);
+    assert.ok(line.includes('[+]'), `dirty marker at pane width ${width}: ${line}`);
+  }
   assert.ok(!f.statuses.has('plan-mode'));
 }));
 test('programmatic reopen of the same artifact preserves chat input focus', async () => fixture(async f => {
