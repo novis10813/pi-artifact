@@ -169,6 +169,9 @@ test('revise and done give explicit feedback without granting execution', () => 
   assert.equal((await f.tool('write')).block, true);
   await f.command('done'); assert.match(last(f), /沒有正在實作的計畫/);
   await f.command('approve'); await f.command('done'); assert.match(last(f), /已標記完成/); assert.equal((await f.tool('write')).block, true);
+  const donePlan = await f.store.read((await f.store.list())[0].id);
+  await assert.rejects(f.tool('create_artifact', { content: '# Must not replace a finished plan' }), /計畫已完成.*\/plan revise/);
+  assert.deepEqual(await f.store.read(donePlan.record.id), donePlan, 'done create rejection must not write content or revision');
   assert.ok(!f.active().includes('subagent'));
   assert.equal((await f.emit('tool_call', { toolName: 'subagent', input: {} })).block, true);
   await f.command('review'); assert.match(last(f), /計畫已完成.*\/plan revise/);

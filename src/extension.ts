@@ -94,6 +94,7 @@ export default function (pi: ExtensionAPI): void {
       const p = ensure(ctx); guardDraft(p.plan.state.artifactId ?? "new artifact");
       // During implementation the approved document must not be silently replaced.
       if (p.plan.state.phase === "executing") throw new Error("實作進行中。要修改計畫請先由使用者 /plan revise。");
+      if (p.plan.state.phase === "done") throw new Error("計畫已完成。要重新提交請先由使用者 /plan revise。");
       const a = p.plan.active ? await p.store.update(p.plan.state.artifactId!, () => params.content, p.plan.state.revision) : await p.store.create(params.content, params.title);
       if (p.plan.active) await p.plan.submit();
       if (ctx.hasUI) setPending(a.record.id);
@@ -218,7 +219,12 @@ export default function (pi: ExtensionAPI): void {
         if (action === "use" && !value) throw new Error("用法：/plan use <artifact-id>");
         if (action === "on") throw new Error("/plan on 已移除。直接用 /plan <目標> 開始規劃。");
         if (action === "execute") throw new Error("/plan execute 已移除。用 /plan approve 核准目前版本並立即開始實作。");
-        if (action === "show") { if (!p.plan.state.artifactId) throw new Error("沒有進行中的計畫。先用 /plan <目標> 開始規劃。"); await open(await p.store.read(p.plan.state.artifactId), ctx); return; }
+        if (action === "show") {
+          if (!p.plan.state.artifactId) throw new Error("沒有進行中的計畫。先用 /plan <目標> 開始規劃。");
+          const a = await p.store.read(p.plan.state.artifactId);
+          // Explicit user intent reveals a hidden pane; background model updates still keep it hidden.
+          await pane.open(resolve(ctx.cwd, a.record.path), ctx); pane.show(ctx); return;
+        }
         if (action === "off" && !p.plan.active) { ctx.ui.notify("目前不在 Plan Mode，沒有需要退出的計畫。", "info"); return; }
         idle(ctx);
         if (action === "goal" || action === "use") {

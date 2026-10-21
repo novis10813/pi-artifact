@@ -81,8 +81,9 @@ with tempfile.TemporaryDirectory(prefix="pi-artifact-pty-") as directory:
         os.write(master, b"\x1b[17~")
         os.write(master, b"i")
         os.write(master, b"\x1b[200~" + "新增中文 ".encode() + b"\x1b[201~")
+        start = len(output)
         os.write(master, b"\x03")
-        pump(0.15)
+        expect(b"NORMAL", start=start)
         os.write(master, b":w\r")
         pump(0.8)
         assert plan.read_text().startswith("新增中文 # Plan"), "Right-pane editing or save failed"
@@ -136,7 +137,7 @@ with tempfile.TemporaryDirectory(prefix="pi-artifact-pty-") as directory:
         pump(0.5)
         os.write(master, b"\x1b[17~G")
         pump(0.4)
-        # Clear the left chat draft and close the pane without any LLM request.
+        # Clear the left chat draft without any LLM request.
         os.write(master, b"\x1b[17~\x03")
         pump(0.4)
         # :wq persists the current draft and hides, without closing pi or losing the document.
@@ -161,6 +162,15 @@ with tempfile.TemporaryDirectory(prefix="pi-artifact-pty-") as directory:
         assert "Implement one verified change." in plan_path.read_text()
         assert not (work / "denied-nested.txt").exists(), "Nested tool bypassed Plan policy"
         assert "test_write" in (work / "probe.jsonl").read_text(), "Nested unsafe probe did not execute its gate"
+        # Hide from chat focus, then explicitly /plan show the same retained document.
+        start = len(output)
+        os.write(master, b"\x1b[18~")
+        expect(b"Plan pane hidden", start=start)
+        start = len(output)
+        command("/plan show")
+        expect(b"F7 hide", start=start)
+        expect(b"PLAN review", start=start)
+        # A freshly remounted pane retains chat focus, ready for the following commands.
         # User ! shell is also blocked while waiting for review.
         command("!touch forbidden-shell")
         assert not (work / "forbidden-shell").exists()
