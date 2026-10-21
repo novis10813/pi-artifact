@@ -118,7 +118,7 @@ export default function (pi: ExtensionAPI): void {
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const p = ensure(ctx), a = await p.store.read(params.artifactId);
       const revision = params.revision ?? a.revision;
-      const content = params.revision ? await p.store.revision(params.artifactId, revision) : a.content;
+      const content = params.revision !== undefined ? await p.store.revision(params.artifactId, revision) : a.content;
       return text(`Artifact ${a.record.id}\nRevision: ${revision}\n\n${content}`, { artifactId: a.record.id, revision, status: a.record.status });
     },
   });

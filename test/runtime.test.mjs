@@ -92,6 +92,7 @@ test('runtime registers historical schemas plus read/replace/submit, updates sam
   const before = await f.tool('read_artifact', { artifactId: a.id }); assert.match(before.content[0].text, /Goal/);
   const originalRevision = (await f.store.read(a.id)).revision;
   assert.ok(before.content[0].text.includes(`Revision: ${originalRevision}`));
+  await assert.rejects(f.tool('read_artifact', { artifactId: a.id, revision: '' }), /Invalid revision reference/);
   await f.tool('edit_artifact', { artifactId: a.id, edits: [{ oldText: '## Approach', newText: '## Chosen approach' }] });
   assert.match((await f.store.read(a.id)).content, /Chosen approach/);
   const historical = await f.tool('read_artifact', { artifactId: a.id, revision: originalRevision });
