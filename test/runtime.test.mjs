@@ -10,10 +10,12 @@ const { ArtifactStore } = await load('store');
 async function fixture(fn) {
   const cwd = await mkdtemp(join(tmpdir(), 'pi-plan-runtime-'));
   const tools = new Map(), commands = new Map(), events = new Map(), entries = [], notices = [], messages = [], statuses = new Map();
-  const reviewScripts = [], reviewFrames = [], confirms = [];
+  const reviewScripts = [], reviewFrames = [], confirms = [], shortcuts = new Map();
   let active = ['read', 'bash', 'write', 'codemode', 'subagent'], idle = true, confirmation = true;
   const pi = {
-    registerTool: tool => tools.set(tool.name, tool), registerCommand: (name, spec) => commands.set(name, spec),
+    registerTool: tool => { assert.ok(!tools.has(tool.name), `Duplicate tool: ${tool.name}`); tools.set(tool.name, tool); },
+    registerCommand: (name, spec) => { assert.ok(!commands.has(name), `Duplicate command: ${name}`); commands.set(name, spec); },
+    registerShortcut: (key, spec) => { assert.ok(!shortcuts.has(key), `Duplicate shortcut: ${key}`); shortcuts.set(key, spec); },
     on: (name, handler) => { const values = events.get(name) ?? []; values.push(handler); events.set(name, values); },
     appendEntry: (customType, data) => entries.push({ type: 'custom', customType, data: structuredClone(data) }),
     getActiveTools: () => active.slice(), setActiveTools: next => { active = next; },
@@ -46,10 +48,15 @@ async function fixture(fn) {
     return tools.get(name)?.execute('call', input, new AbortController().signal, undefined, ctx);
   };
   try { await emit('session_start'); await fn({ cwd, ctx, tools, commands, emit, entries, messages, notices, statuses, command, tool,
-    reviewScripts, reviewFrames, confirms, store: new ArtifactStore(cwd), active: () => active, setIdle: value => { idle = value; }, setConfirm: value => { confirmation = value; } }); }
+    reviewScripts, reviewFrames, confirms, shortcuts, store: new ArtifactStore(cwd), active: () => active, setIdle: value => { idle = value; }, setConfirm: value => { confirmation = value; } }); }
   finally { await emit('session_shutdown', { reason: 'quit' }); await rm(cwd, { recursive: true, force: true }); }
 }
 const last = f => f.notices.at(-1).text;
+test('registers each artifact tool, command and shortcut exactly once', () => fixture(async f => {
+  assert.deepEqual([...f.tools.keys()].sort(), ['create_artifact', 'edit_artifact', 'read_artifact', 'replace_artifact', 'request_plan_review']);
+  assert.deepEqual([...f.commands.keys()].sort(), ['artifact', 'plan', 'plan-pane']);
+  assert.deepEqual([...f.shortcuts.keys()], ['f7']);
+}));
 test('/plan review requests revision-bound subagent review in chat; legacy line comments remain compatible', () => fixture(async f => {
   const a = await f.store.create('# Context\n\nsecond line', 'Review');
   const line = a.content.split('\n').indexOf('# Context') + 2;

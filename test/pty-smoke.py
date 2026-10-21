@@ -86,6 +86,39 @@ with tempfile.TemporaryDirectory(prefix="pi-artifact-pty-") as directory:
         os.write(master, b":w\r")
         pump(0.8)
         assert plan.read_text().startswith("新增中文 # Plan"), "Right-pane editing or save failed"
+        saved = plan.read_text()
+        # Real shortcut dispatch: search, wrapping, cancellation and both word-motion sets.
+        start = len(output)
+        os.write(master, "/原始\r".encode())
+        expect(b"NORMAL 2:1", start=start)
+        start = len(output)
+        os.write(master, b"n")
+        expect(b"wrapped to top", start=start)
+        start = len(output)
+        os.write(master, b"N")
+        expect(b"wrapped to bottom", start=start)
+        start = len(output)
+        os.write(master, b"/absent-pattern\r")
+        expect(b"Pattern not found: absent-pattern", start=start)
+        os.write(master, b"/cancelled\x03")
+        pump(0.2)
+        start = len(output)
+        os.write(master, b"/long\r")
+        expect(b"NORMAL 3:1", start=start)
+        for key, position in [(b"w", b"3:6"), (b"e", b"3:9"), (b"b", b"3:6"),
+                              (b"W", b"3:11"), (b"E", b"3:14"), (b"B", b"3:11")]:
+            start = len(output)
+            os.write(master, key)
+            expect(b"NORMAL " + position, start=start)
+        start = len(output)
+        os.write(master, b"v")
+        expect(b"VISUAL 3:11", start=start)
+        start = len(output)
+        os.write(master, b"b")
+        expect(b"VISUAL 3:6", start=start)
+        os.write(master, b"\x1b")
+        pump(0.2)
+        assert plan.read_text() == saved, "Search or word motions changed the saved document"
         # F7 from the focused document hides the pane through pi's shortcut dispatch; F7 from chat reshows it.
         start = len(output)
         os.write(master, b"\x1b[18~")
@@ -106,6 +139,14 @@ with tempfile.TemporaryDirectory(prefix="pi-artifact-pty-") as directory:
         # Clear the left chat draft and close the pane without any LLM request.
         os.write(master, b"\x1b[17~\x03")
         pump(0.4)
+        # :wq persists the current draft and hides, without closing pi or losing the document.
+        os.write(master, b"\x1b[17~A")
+        os.write(master, b"\x1b[200~ wq-saved\x1b[201~\x03")
+        pump(0.2)
+        start = len(output)
+        os.write(master, b":wq\r")
+        expect(b"Plan pane hidden", start=start)
+        assert "wq-saved" in plan.read_text(), ":wq hid before saving the document"
         command("/plan-pane close")
         # Drive the COMPLETE lifecycle with a deterministic offline model.
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 36, 180, 0, 0))
@@ -171,7 +212,7 @@ with tempfile.TemporaryDirectory(prefix="pi-artifact-pty-") as directory:
         child.wait(timeout=8)
         assert child.returncode == 0, f"Unexpected pi exit: {child.returncode}"
         assert b"Failed to load extension" not in output
-        print("PTY smoke passed: real pi split/CJK/resize, offline model updates same plan, nested+shell policy, optional review, one-step approve+execute, legacy line review, approved write, content-change revocation, clean exit.")
+        print("PTY smoke passed: real pi split/CJK/Ctrl+C/:w/:wq/F7/search/word motions/resize, offline model updates same plan, main-session nested+shell policy, subagent review dispatch, one-step approve+execute, legacy line review, approved write, content-change revocation, clean exit.")
     finally:
         if child.poll() is None:
             os.killpg(child.pid, signal.SIGKILL)
