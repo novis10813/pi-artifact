@@ -6,7 +6,7 @@ import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
-  let step = 0, calls = 0;
+  let step = 0, calls = 0, reviewStep = 0;
   const log = (value: unknown) => appendFile("probe.jsonl", JSON.stringify(value) + "\n");
   pi.registerTool({ name: "test_write", label: "Unsafe test probe", description: "Test nested permission interception", exposure: "codemode", parameters: Type.Object({}),
     async execute() { await writeFile("denied-nested.txt", "BUG"); return { content: [{ type: "text", text: "BUG" }], details: undefined }; },
@@ -17,6 +17,13 @@ export default function (pi: ExtensionAPI) {
       try { const result = await ctx.executeTool("test_write", {}); await log({ nestedResult: result }); }
       catch (error) { await log({ nestedBlocked: String(error) }); }
       return { content: [{ type: "text", text: "Offline search finished." }], details: undefined };
+    },
+  });
+  // Dispatch fixture, not a real child process or a read-only enforcement test.
+  pi.registerTool({ name: "subagent", label: "Offline reviewer", description: "Offline review dispatch fixture", parameters: Type.Object({ agent: Type.String(), task: Type.String() }),
+    async execute(_id, args) {
+      await log({ reviewDispatch: args });
+      return { content: [{ type: "text", text: "Review PASS. No blocking issues. Execution remains unapproved." }], details: undefined };
     },
   });
   pi.on("tool_result", async event => { await log({ tool: event.toolName, isError: event.isError, details: event.details }); });
@@ -37,10 +44,13 @@ export default function (pi: ExtensionAPI) {
           const userTexts = context.messages.filter((m: any) => m.role === "user").map((m: any) =>
             typeof m.content === "string" ? m.content : m.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n"));
           const execute = userTexts.some(text => text.startsWith("Execute approved plan "));
-          await log({ providerCall: calls, step, execute });
+          const review = userTexts.findLast(text => text.startsWith("Plan review requested: "));
+          await log({ providerCall: calls, step, execute, reviewStep });
           const index = JSON.parse(await readFile(join(".pi/artifacts/index.json"), "utf8"));
           let tool: { name: string; arguments: unknown } | undefined;
           if (execute && step < 10) { step = 10; tool = { name: "write", arguments: { path: "approved.txt", content: "approved implementation\n" } }; }
+          else if (review && reviewStep === 0) { reviewStep++; tool = { name: "subagent", arguments: { agent: "spec-reviewer", task: review } }; }
+          else if (review && reviewStep === 1) { reviewStep++; tool = { name: "read_artifact", arguments: { artifactId: index.artifacts[0].id } }; }
           else if (!execute && step === 0) { step++; tool = { name: "web_search", arguments: {} }; }
           else if (!execute && step === 1) { step++; tool = { name: "edit_artifact", arguments: { artifactId: index.artifacts[0].id, edits: [{ oldText: "## Approach", newText: "## Approach\nImplement one verified change." }] } }; }
           else if (!execute && step === 2) { step++; tool = { name: "request_plan_review", arguments: {} }; }
@@ -52,7 +62,7 @@ export default function (pi: ExtensionAPI) {
             stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: message });
             message.stopReason = "toolUse";
           } else {
-            const response = execute ? "Implementation complete." : "Waiting for explicit plan approval.";
+            const response = execute ? "Implementation complete." : review && reviewStep === 2 ? "Subagent review complete. No blocking issues. Still awaiting user approval." : "Waiting for explicit plan approval.";
             message.content.push({ type: "text", text: response });
             stream.push({ type: "text_start", contentIndex: 0, partial: message });
             stream.push({ type: "text_delta", contentIndex: 0, delta: response, partial: message });

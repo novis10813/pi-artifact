@@ -125,7 +125,12 @@ with tempfile.TemporaryDirectory(prefix="pi-artifact-pty-") as directory:
         assert not (work / "forbidden-shell").exists()
         start = len(output)
         command("/plan review")
-        expect("已提交".encode(), start=start)
+        expect(b"Subagent review complete.", start=start)
+        probes = [json.loads(line) for line in (work / "probe.jsonl").read_text().splitlines()]
+        dispatch = next(p["reviewDispatch"] for p in probes if "reviewDispatch" in p)
+        assert dispatch["agent"] == "spec-reviewer"
+        assert "revisions" in dispatch["task"] and "exact revision" in dispatch["task"]
+        assert not (work / "approved.txt").exists(), "Subagent PASS unlocked implementation"
         assert b"Artifact Review" not in output[start:], "/plan review must not open the manual line-review UI"
         # Legacy /artifact line review remains available and stores comments.
         start = len(output)

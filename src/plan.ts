@@ -10,6 +10,8 @@ export const PLAN_ENTRY = "pi-artifact:plan:v1";
 const phases: Phase[] = ["off", "planning", "review", "approved", "executing", "done"];
 export const PLANNING_TOOLS = new Set([
   "read", "grep", "find", "ls", "web_search", "web_fetch", "ask_user_question",
+  // Explicit user opt-in: child permissions are owned by the subagent extension, not this policy.
+  "subagent", "list_subagents", "subagent_status",
   "read_artifact", "create_artifact", "edit_artifact", "replace_artifact", "request_plan_review",
   "TaskCreate", "TaskList", "TaskGet", "TaskUpdate", "set_verify", "view_context", "self_compact",
 ]);
@@ -93,7 +95,7 @@ export class PlanController {
       this.set({ ...this.state, phase: "planning", approval: undefined });
     }
     if (!this.restricted) return;
-    if (!PLANNING_TOOLS.has(tool)) return `Plan Mode (${this.state.phase}) blocks ${tool}. Shells, arbitrary code, delegation, background jobs, project writes and unknown tools require the user to /plan approve this revision.`;
+    if (!PLANNING_TOOLS.has(tool)) return `Plan Mode (${this.state.phase}) blocks ${tool}. Main-agent shells, arbitrary code, workflows, background jobs, project writes and unknown tools require the user to /plan approve this revision. Subagent child permissions are not restricted by Plan Mode.`;
     if (["edit_artifact", "replace_artifact"].includes(tool) && input.artifactId !== this.state.artifactId) return "Plan Mode may update only its active plan artifact.";
     if (dirty && ["edit_artifact", "replace_artifact", "create_artifact", "request_plan_review"].includes(tool)) return "Unsaved manual plan edits. Save, copy or discard them before a model update or review.";
   }
@@ -102,6 +104,6 @@ export class PlanController {
     if (this.state.phase === "done") return `Plan Mode: done. Active plan ${this.state.artifactId}, revision ${this.state.revision}. Implementation is finished and project writes/shell are blocked again. Edits do not reopen this plan; do not call request_plan_review. Only the user's /plan revise reopens it, or /plan off exits.`;
     return `Plan Mode: ${this.state.phase}. Active plan ${this.state.artifactId}, revision ${this.state.revision}. ${this.state.phase === "executing"
       ? "Implement only this approved revision. Reuse existing task, verification and reviewer tools. Plan content changes revoke permission before the next tool call."
-      : "Do not implement project changes or run shells/delegation/codemode. Explore with read/grep/find/ls/web tools. Read and update the SAME artifact using read_artifact/edit_artifact/replace_artifact, not a new plan per reply. Save is not approval. Keep answering questions and revising during review; any edit returns the plan to planning and invalidates earlier review conclusions. When ready call request_plan_review and end your turn. Only the user's /plan approve authorizes execution; it approves this exact revision and starts implementation."}`;
+      : "Do not implement project changes or run shells/workflows/codemode. Explore with read/grep/find/ls/web tools, and call subagent directly for exploration or review. Ask child agents not to write or run shells, but do not claim this is enforced: Plan Mode does not restrict child tools or nested delegation. Subagent conclusions never approve or start execution. Summarize findings in the main conversation and label them with the reviewed revision; after edits, old conclusions are stale. Read and update the SAME artifact using read_artifact/edit_artifact/replace_artifact, not a new plan per reply. Save is not approval. Keep answering questions and revising during review; any edit returns the plan to planning and invalidates earlier review conclusions. When ready call request_plan_review and end your turn. Only the user's /plan approve authorizes execution; it approves this exact revision and starts implementation."}`;
   }
 }

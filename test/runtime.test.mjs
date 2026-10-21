@@ -50,18 +50,36 @@ async function fixture(fn) {
   finally { await emit('session_shutdown', { reason: 'quit' }); await rm(cwd, { recursive: true, force: true }); }
 }
 const last = f => f.notices.at(-1).text;
-test('/plan review only submits; legacy /artifact line review keeps comments and grants nothing', () => fixture(async f => {
+test('/plan review requests revision-bound subagent review in chat; legacy line comments remain compatible', () => fixture(async f => {
   const a = await f.store.create('# Context\n\nsecond line', 'Review');
   const line = a.content.split('\n').indexOf('# Context') + 2;
   await f.store.review(a.record.id, a.revision, 'rejected', '', [{ line, comment: 'keep this comment' }]);
   await f.command(`use ${a.record.id}`); f.ctx.mode = 'tui';
   await f.command('review');
-  assert.equal(f.reviewFrames.length, 0, 'no manual line-review UI'); assert.match(last(f), /已提交 rev .*審查不是執行授權/);
+  assert.equal(f.reviewFrames.length, 0, 'no manual line-review UI'); assert.match(last(f), /已提交 rev .*subagent 審查。審查不是執行授權/);
+  const request = f.messages.at(-1);
+  assert.match(request, /call subagent directly now, in foreground/);
+  assert.ok(request.includes(join(f.cwd, '.pi/artifacts/revisions', a.record.id, `${a.revision}.md`)));
+  assert.match(request, /NOT a Plan Mode tool restriction/); assert.match(request, /If it changed, label the result stale/);
+  assert.equal(await f.emit('tool_call', { toolName: 'subagent', input: { agent: 'spec-reviewer', task: request } }), undefined);
   assert.equal((await f.tool('write')).block, true);
   f.reviewScripts.push(['a', 'y']); await f.commands.get('artifact').handler(`review ${a.record.id}`, f.ctx);
   assert.equal(f.reviewFrames.length, 1); assert.match(last(f), /does not change Plan Mode or authorize/);
   assert.equal((await f.store.readReview(a.record.id, a.revision)).lineComments[0].comment, 'keep this comment');
   assert.equal((await f.tool('write')).block, true);
+}));
+test('/plan review reports unavailable subagent and clears a prior create stop guard when available', () => fixture(async f => {
+  await f.command('feature');
+  f.active().splice(f.active().indexOf('subagent'), 1);
+  const count = f.messages.length;
+  await f.command('review'); assert.match(last(f), /subagent 工具未啟用.*略過審查/); assert.equal(f.messages.length, count);
+  f.active().push('subagent');
+  await f.tool('create_artifact', { content: '# Revised' });
+  assert.equal((await f.tool('read')).block, true, 'create stop guard is armed');
+  await f.command('review'); assert.match(f.messages.at(-1), /Plan review requested:/);
+  assert.equal(await f.emit('tool_call', { toolName: 'subagent', input: {} }), undefined, 'review clears the stop guard');
+  await f.tool('edit_artifact', { artifactId: (await f.store.list())[0].id, edits: [{ oldText: 'Revised', newText: 'After review' }] });
+  await f.command('status'); assert.match(last(f), /PLAN planning/); assert.equal((await f.tool('write')).block, true);
 }));
 test('runtime registers historical schemas plus read/replace/submit, updates same plan and keeps review open', () => fixture(async f => {
   assert.deepEqual(Object.keys(f.tools.get('create_artifact').parameters.properties), ['content', 'title']);
@@ -69,7 +87,8 @@ test('runtime registers historical schemas plus read/replace/submit, updates sam
   await f.command('implement user feature');
   const [a] = await f.store.list(); assert.ok(a); assert.ok(f.messages.at(-1).includes(a.id));
   assert.match((await f.store.read(a.id)).content, /## Goal\nimplement user feature/); assert.match(last(f), /已開始規劃.*尚未允許實作/);
-  assert.ok(!f.active().includes('codemode'));
+  assert.ok(!f.active().includes('codemode')); assert.ok(f.active().includes('subagent'));
+  assert.match(last(f), /子代理權限未受 Plan Mode 限制/);
   const before = await f.tool('read_artifact', { artifactId: a.id }); assert.match(before.content[0].text, /Goal/);
   await f.tool('edit_artifact', { artifactId: a.id, edits: [{ oldText: '## Approach', newText: '## Chosen approach' }] });
   assert.match((await f.store.read(a.id)).content, /Chosen approach/);

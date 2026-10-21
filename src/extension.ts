@@ -175,7 +175,7 @@ export default function (pi: ExtensionAPI): void {
   const SUBCOMMANDS: Array<{ name: string; description: string; blocked: () => string | undefined }> = [
     { name: "status", description: "顯示目前階段與用法", blocked: () => undefined },
     { name: "show", description: "重新開啟右側計畫文件", blocked: () => plan?.active ? undefined : "沒有進行中的計畫" },
-    { name: "review", description: "選用：提交目前版本供審查，不是執行授權", blocked: () => !plan?.active ? "沒有進行中的計畫" : plan.state.phase === "executing" ? "實作進行中" : plan.state.phase === "done" ? "計畫已完成" : undefined },
+    { name: "review", description: "選用：由主模型呼叫 subagent 審查目前版本，不是執行授權", blocked: () => !plan?.active ? "沒有進行中的計畫" : plan.state.phase === "executing" ? "實作進行中" : plan.state.phase === "done" ? "計畫已完成" : !pi.getActiveTools().includes("subagent") ? "subagent 工具未啟用" : undefined },
     { name: "approve", description: "核准目前已儲存的版本並立即開始實作", blocked: () => !plan?.active ? "沒有進行中的計畫" : ["planning", "review"].includes(plan.state.phase) ? (pane.dirty ? "右側有未儲存編輯" : undefined) : plan.state.phase === "executing" ? "已在實作中" : "計畫已完成" },
     { name: "revise", description: "回到規劃，撤銷執行授權", blocked: () => plan?.active ? undefined : "沒有進行中的計畫" },
     { name: "done", description: "標記實作完成，再次封鎖寫入", blocked: () => plan?.state.phase === "executing" ? undefined : plan?.state.phase === "done" ? "計畫已完成，要再實作請先 /plan revise" : "沒有正在實作的計畫" },
@@ -191,7 +191,7 @@ export default function (pi: ExtensionAPI): void {
     const p = ensure(ctx);
     await p.plan.enter(a.record.id, pi.getActiveTools()); if (pending) setPending(); await open(a, ctx);
     loadout(); status(ctx);
-    ctx.ui.notify(`已開始規劃 ${a.record.id}。模型會探索並修改同一份計畫，尚未允許實作。下一步：繼續討論，或 /plan review（選用）、/plan approve 核准並開始實作。`, "info");
+    ctx.ui.notify(`已開始規劃 ${a.record.id}。模型會探索並修改同一份計畫，尚未允許實作。subagent 可直接呼叫，子代理權限未受 Plan Mode 限制。下一步：繼續討論，或 /plan review（選用）、/plan approve 核准並開始實作。`, "info");
     pi.sendUserMessage(`Plan Mode enabled for ${a.record.id}. ${goal ?? "Use the conversation's requirements."} Explore and revise this SAME artifact. Do not implement. Submit with request_plan_review when ready.`);
   };
   pi.registerCommand("plan", {
@@ -228,14 +228,23 @@ export default function (pi: ExtensionAPI): void {
           const tools = p.plan.off(); if (tools) pi.setActiveTools(tools); status(ctx);
           ctx.ui.notify(tools ? "已退出 Plan Mode，已恢復原本的工具權限。計畫未被核准或執行。" : "已退出 Plan Mode，但找不到原本的工具清單（狀態損毀），工具未還原。用 /reload 重新載入。計畫未被核准或執行。", tools ? "info" : "warning");
         } else if (action === "review") {
-          await p.plan.submit(); loadout(); status(ctx);
-          ctx.ui.notify(`已提交 rev ${short(p.plan.state.revision)} 審查。審查不是執行授權，可繼續提問與修改；修改後會回到規劃。`, "info");
+          if (!pi.getActiveTools().includes("subagent")) throw new Error("subagent 工具未啟用，無法委派審查。請先安裝或啟用 subagent extension；也可略過審查，直接 /plan approve。");
+          await p.plan.submit(); if (pending) setPending(); loadout(); status(ctx);
+          const { artifactId, revision } = p.plan.state;
+          const snapshot = resolve(p.store.root, "revisions", artifactId!, `${revision}.md`);
+          ctx.ui.notify(`已提交 rev ${short(revision)}，將由主模型呼叫 subagent 審查。審查不是執行授權，可繼續提問與修改；修改後會回到規劃。子代理權限未受 Plan Mode 限制。`, "info");
+          pi.sendUserMessage([
+            `Plan review requested: ${artifactId}, exact revision ${revision}.`,
+            `Main agent: call subagent directly now, in foreground, using spec-reviewer (or another available review agent). Return its findings and your concise summary to this conversation. Do not open the manual /artifact line-review UI.`,
+            `Give the child a self-contained brief: review only the immutable plan snapshot at ${JSON.stringify(snapshot)}. Cwd: ${JSON.stringify(ctx.cwd)}. Read that snapshot and relevant repository files to check feasibility, scope, missing requirements, risks and verification. Report findings with severity and locations, and label the result with revision ${revision}. Do not modify files, run shells or delegate again. These are task instructions, NOT a Plan Mode tool restriction on the child.`,
+            `The main agent must read_artifact after the child returns and compare its current revision to ${revision}. If it changed, label the result stale; do not treat the old review as passing the new plan. A positive review never approves or starts implementation. If delegation fails, report the failure without fabricating a review. Continue Q&A or revisions, and wait for the user's /plan approve before implementation.`,
+          ].join("\n"));
         } else if (action === "approve") {
           if (ctx.mode !== "tui") throw new Error("核准執行需要互動式確認視窗，請在 pi 終端介面中執行 /plan approve。");
           await p.plan.sync(); const revision = p.plan.state.revision;
           if (!["planning", "review"].includes(p.plan.state.phase) || !revision) throw new Error(p.plan.state.phase === "executing" ? "這個版本已在實作中。" : p.plan.state.phase === "done" ? "計畫已完成。要再實作請先 /plan revise。" : "沒有可核准的計畫。先用 /plan <目標> 開始規劃。");
           const a = await p.store.read(p.plan.state.artifactId!); await open(a, ctx);
-          const ok = await ctx.ui.confirm("核准並開始實作？", `${a.record.id}\nSHA-256 ${revision}\n確認後立即開始實作這個確切版本，並開放專案寫入、shell 指令與委派（subagent、workflow 等）。計畫之後若變更，授權會自動撤銷。`);
+          const ok = await ctx.ui.confirm("核准並開始實作？", `${a.record.id}\nSHA-256 ${revision}\n確認後立即開始實作這個確切版本，並開放主模型的專案寫入、shell 指令與 workflow 等委派。subagent 已可呼叫，其子代理權限未受 Plan Mode 限制。計畫之後若變更，授權會自動撤銷。`);
           if (!ok) { ctx.ui.notify("已取消核准，仍在規劃中，尚未允許實作。", "info"); return; }
           // The draft or the file may have changed while the dialog was open.
           idle(ctx); await p.plan.approve(revision); if (pending) setPending(); loadout(); status(ctx);

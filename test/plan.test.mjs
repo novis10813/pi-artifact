@@ -34,10 +34,10 @@ test('approve grants execution for the exact revision in one step; review is opt
   assert.deepEqual(plan.off(), ['read', 'bash']); assert.equal(await plan.block('bash', {}), undefined);
   await plan.enter(a.record.id, []); await plan.submit(); await plan.approve(plan.state.revision); assert.equal(plan.state.phase, 'executing');
 }));
-test('fail-closed planning policy blocks nested wrappers, delegation, shell, background and unknown tools', () => fixture(async ({ plan, a }) => {
+test('planning allows subagents by user opt-in but blocks main-agent wrappers, workflows, shell, background and unknown tools', () => fixture(async ({ plan, a }) => {
   await plan.enter(a.record.id, []);
-  for (const tool of ['bash', 'powershell', 'write', 'edit', 'codemode', 'workflow', 'subagent', 'spawn_background', 'mcp__server__unknown', 'imagegen']) assert.match(await plan.block(tool, {}), /blocks.*\/plan approve/);
-  for (const tool of ['read', 'grep', 'web_search', 'read_artifact', 'TaskList', 'set_verify']) assert.equal(await plan.block(tool, {}), undefined);
+  for (const tool of ['bash', 'powershell', 'write', 'edit', 'codemode', 'workflow', 'spawn_background', 'mcp__server__unknown', 'imagegen']) assert.match(await plan.block(tool, {}), /blocks.*\/plan approve/);
+  for (const tool of ['read', 'grep', 'web_search', 'read_artifact', 'TaskList', 'set_verify', 'subagent', 'list_subagents', 'subagent_status']) assert.equal(await plan.block(tool, {}), undefined);
   assert.match(await plan.block('edit_artifact', { artifactId: 'art_other' }), /only its active/);
   assert.match(await plan.block('edit_artifact', { artifactId: a.record.id }, true), /Unsaved/);
 }));
@@ -45,12 +45,13 @@ test('review keeps Q&A and revisions open; an edit returns to planning; generic 
   await plan.enter(a.record.id, []); await store.review(a.record.id, a.revision, 'approved');
   assert.equal(plan.state.phase, 'planning');
   await plan.submit(); assert.equal(plan.state.phase, 'review');
-  for (const tool of ['ask_user_question', 'grep', 'web_search', 'TaskCreate', 'edit_artifact']) assert.equal(await plan.block(tool, { artifactId: a.record.id }), undefined, tool);
+  for (const tool of ['ask_user_question', 'grep', 'web_search', 'TaskCreate', 'edit_artifact', 'subagent']) assert.equal(await plan.block(tool, { artifactId: a.record.id }), undefined, tool);
   assert.ok(await plan.block('write', {}));
   await store.update(a.record.id, c => c + '\nrevised during review');
   assert.equal(await plan.block('read', {}), undefined); assert.equal(plan.state.phase, 'planning');
   await assert.rejects(plan.approve(a.revision), /已變更/);
   assert.match(plan.prompt(), /only the user's \/plan approve/i); assert.doesNotMatch(plan.prompt(), /execute/);
+  assert.match(plan.prompt(), /call subagent directly/); assert.match(plan.prompt(), /does not restrict child tools or nested delegation/);
 }));
 test('disk changes and unsaved manual edits revoke permission before next tool', () => fixture(async ({ plan, a, cwd }) => {
   await plan.enter(a.record.id, []); await plan.approve(a.revision);
