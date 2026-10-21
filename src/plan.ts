@@ -8,10 +8,10 @@ export interface PlanState {
 }
 export const PLAN_ENTRY = "pi-artifact:plan:v1";
 const phases: Phase[] = ["off", "planning", "review", "approved", "executing", "done"];
+// Explicit user opt-in: child permissions are owned by the subagent extension, not this policy.
+const PLAN_DELEGATION_TOOLS = new Set(["subagent", "list_subagents", "subagent_status"]);
 export const PLANNING_TOOLS = new Set([
   "read", "grep", "find", "ls", "web_search", "web_fetch", "ask_user_question",
-  // Explicit user opt-in: child permissions are owned by the subagent extension, not this policy.
-  "subagent", "list_subagents", "subagent_status",
   "read_artifact", "create_artifact", "edit_artifact", "replace_artifact", "request_plan_review",
   "TaskCreate", "TaskList", "TaskGet", "TaskUpdate", "set_verify", "view_context", "self_compact",
 ]);
@@ -32,6 +32,9 @@ export class PlanController {
   constructor(readonly store: ArtifactStore, private persist: (state: PlanState) => void) {}
   get active() { return this.corrupt || this.state.phase !== "off"; }
   get restricted() { return this.active && this.state.phase !== "executing"; }
+  allowsPlanningTool(tool: string) {
+    return PLANNING_TOOLS.has(tool) || (["planning", "review"].includes(this.state.phase) && PLAN_DELEGATION_TOOLS.has(tool));
+  }
   private set(state: PlanState) { this.persist(structuredClone(state)); this.state = state; this.corrupt = false; }
   restore(entries: Array<{ type: string; customType?: string; data?: unknown }>) {
     this.state = { v: 1, phase: "off" }; this.corrupt = false;
@@ -95,7 +98,8 @@ export class PlanController {
       this.set({ ...this.state, phase: "planning", approval: undefined });
     }
     if (!this.restricted) return;
-    if (!PLANNING_TOOLS.has(tool)) return `Plan Mode (${this.state.phase}) blocks ${tool}. Main-agent shells, arbitrary code, workflows, background jobs, project writes and unknown tools require the user to /plan approve this revision. Subagent child permissions are not restricted by Plan Mode.`;
+    if (PLAN_DELEGATION_TOOLS.has(tool) && !["planning", "review"].includes(this.state.phase)) return `Plan Mode (${this.state.phase}) blocks ${tool}. Use /plan revise to reopen planning, or /plan off to exit.`;
+    if (!this.allowsPlanningTool(tool)) return `Plan Mode (${this.state.phase}) blocks ${tool}. Main-agent shells, arbitrary code, workflows, background jobs, project writes and unknown tools require the user to /plan approve this revision. Subagent child permissions are not restricted by Plan Mode.`;
     if (["edit_artifact", "replace_artifact"].includes(tool) && input.artifactId !== this.state.artifactId) return "Plan Mode may update only its active plan artifact.";
     if (dirty && ["edit_artifact", "replace_artifact", "create_artifact", "request_plan_review"].includes(tool)) return "Unsaved manual plan edits. Save, copy or discard them before a model update or review.";
   }

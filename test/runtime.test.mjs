@@ -90,8 +90,14 @@ test('runtime registers historical schemas plus read/replace/submit, updates sam
   assert.ok(!f.active().includes('codemode')); assert.ok(f.active().includes('subagent'));
   assert.match(last(f), /子代理權限未受 Plan Mode 限制/);
   const before = await f.tool('read_artifact', { artifactId: a.id }); assert.match(before.content[0].text, /Goal/);
+  const originalRevision = (await f.store.read(a.id)).revision;
+  assert.ok(before.content[0].text.includes(`Revision: ${originalRevision}`));
   await f.tool('edit_artifact', { artifactId: a.id, edits: [{ oldText: '## Approach', newText: '## Chosen approach' }] });
   assert.match((await f.store.read(a.id)).content, /Chosen approach/);
+  const historical = await f.tool('read_artifact', { artifactId: a.id, revision: originalRevision });
+  assert.ok(historical.content[0].text.includes(`Revision: ${originalRevision}`)); assert.doesNotMatch(historical.content[0].text, /Chosen approach/);
+  const changed = await f.tool('read_artifact', { artifactId: a.id });
+  assert.ok(changed.content[0].text.includes(`Revision: ${(await f.store.read(a.id)).revision}`));
   await f.tool('create_artifact', { content: '# Revised same plan' });
   assert.equal((await f.store.list()).length, 1);
   assert.match((await f.store.read(a.id)).content, /Revised same plan/);
@@ -155,6 +161,8 @@ test('revise and done give explicit feedback without granting execution', () => 
   assert.equal((await f.tool('write')).block, true);
   await f.command('done'); assert.match(last(f), /沒有正在實作的計畫/);
   await f.command('approve'); await f.command('done'); assert.match(last(f), /已標記完成/); assert.equal((await f.tool('write')).block, true);
+  assert.ok(!f.active().includes('subagent'));
+  assert.equal((await f.emit('tool_call', { toolName: 'subagent', input: {} })).block, true);
   await f.command('review'); assert.match(last(f), /計畫已完成.*\/plan revise/);
   await f.command('approve'); assert.match(last(f), /計畫已完成.*\/plan revise/); assert.equal((await f.tool('write')).block, true);
   await f.command('revise'); await f.command('approve');

@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import installPane from "./pane-controller.ts";
 import { ArtifactStore, exactEdits, type Artifact } from "./store.ts";
-import { PlanController, PLAN_ENTRY, PLANNING_TOOLS } from "./plan.ts";
+import { PlanController, PLAN_ENTRY } from "./plan.ts";
 import { openReviewUI } from "./review.ts";
 
 const PENDING_ENTRY = "pi-artifact:pending:v1";
@@ -26,7 +26,7 @@ export default function (pi: ExtensionAPI): void {
   const loadout = () => {
     if (!plan?.active) return;
     const previous = plan.state.previousTools ?? pi.getActiveTools();
-    pi.setActiveTools(plan.restricted ? [...new Set([...previous.filter(x => PLANNING_TOOLS.has(x)), "read_artifact", "edit_artifact", "replace_artifact", "request_plan_review"])] : previous);
+    pi.setActiveTools(plan.restricted ? [...new Set([...previous.filter(x => plan!.allowsPlanningTool(x)), "read_artifact", "edit_artifact", "replace_artifact", "request_plan_review"])] : previous);
   };
   const pane = installPane(pi, async ctx => {
     if (plan?.active) { await plan.sync(); loadout(); status(ctx); }
@@ -117,7 +117,9 @@ export default function (pi: ExtensionAPI): void {
     parameters: Type.Object({ artifactId: Type.String(), revision: Type.Optional(Type.String()) }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const p = ensure(ctx), a = await p.store.read(params.artifactId);
-      return text(params.revision ? await p.store.revision(params.artifactId, params.revision) : a.content, { artifactId: a.record.id, revision: params.revision ?? a.revision, status: a.record.status });
+      const revision = params.revision ?? a.revision;
+      const content = params.revision ? await p.store.revision(params.artifactId, revision) : a.content;
+      return text(`Artifact ${a.record.id}\nRevision: ${revision}\n\n${content}`, { artifactId: a.record.id, revision, status: a.record.status });
     },
   });
   pi.registerTool({
@@ -228,7 +230,7 @@ export default function (pi: ExtensionAPI): void {
           const tools = p.plan.off(); if (tools) pi.setActiveTools(tools); status(ctx);
           ctx.ui.notify(tools ? "已退出 Plan Mode，已恢復原本的工具權限。計畫未被核准或執行。" : "已退出 Plan Mode，但找不到原本的工具清單（狀態損毀），工具未還原。用 /reload 重新載入。計畫未被核准或執行。", tools ? "info" : "warning");
         } else if (action === "review") {
-          if (!pi.getActiveTools().includes("subagent")) throw new Error("subagent 工具未啟用，無法委派審查。請先安裝或啟用 subagent extension；也可略過審查，直接 /plan approve。");
+          if (["planning", "review"].includes(p.plan.state.phase) && !pi.getActiveTools().includes("subagent")) throw new Error("subagent 工具未啟用，無法委派審查。請先安裝或啟用 subagent extension；也可略過審查，直接 /plan approve。");
           await p.plan.submit(); if (pending) setPending(); loadout(); status(ctx);
           const { artifactId, revision } = p.plan.state;
           const snapshot = resolve(p.store.root, "revisions", artifactId!, `${revision}.md`);

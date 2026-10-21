@@ -23,6 +23,9 @@ test('approve grants execution for the exact revision in one step; review is opt
   await assert.rejects(plan.approve(a.revision), /已在實作/); await assert.rejects(plan.submit(), /實作進行中/);
   plan.finish(); assert.ok(await plan.block('write', {})); await assert.rejects(plan.approve(a.revision), /計畫已完成/); await assert.rejects(plan.submit(), /計畫已完成/);
   assert.throws(() => plan.finish(), /計畫已完成.*\/plan revise/); assert.equal(plan.state.approval, undefined);
+  for (const tool of ['subagent', 'list_subagents', 'subagent_status']) {
+    assert.equal(plan.allowsPlanningTool(tool), false); assert.match(await plan.block(tool, {}), /blocks.*\/plan revise/);
+  }
   const edited = await store.update(a.record.id, c => c + '\nafter done');
   assert.ok(await plan.block('write', {})); assert.equal(plan.state.revision, edited.revision); assert.equal(plan.state.approval, undefined); assert.match(plan.prompt(), /Only the user's \/plan revise/); assert.doesNotMatch(plan.prompt(), /request_plan_review and end/);
   await assert.rejects(plan.approve(edited.revision), /計畫已完成/); await assert.rejects(plan.submit(), /計畫已完成/); assert.equal(plan.state.phase, 'done');
