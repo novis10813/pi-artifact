@@ -170,10 +170,21 @@ with tempfile.TemporaryDirectory(prefix="pi-artifact-pty-") as directory:
         command("/plan show")
         expect(b"F7 hide", start=start)
         expect(b"PLAN review", start=start)
-        # A freshly remounted pane retains chat focus, ready for the following commands.
-        # User ! shell is also blocked while waiting for review.
+        # Repeated show on the mounted pane must keep chat focus, not redirect pasted commands.
+        command("/plan show")
+        start = len(output)
         command("!touch forbidden-shell")
+        expect(b"blocks bash", start=start)
         assert not (work / "forbidden-shell").exists()
+        # Closed -> show follows the same focus contract as hidden -> show.
+        command("/plan-pane close")
+        command("/plan show")
+        start = len(output)
+        command("!touch forbidden-after-show")
+        expect(b"blocks bash", start=start)
+        assert not (work / "forbidden-after-show").exists()
+        snapshot = work / ".pi/artifacts/revisions" / artifact["id"] / (artifact["revision"] + ".md")
+        assert plan_path.read_text() == snapshot.read_text(), "Show or chat commands changed the document"
         start = len(output)
         command("/plan review")
         expect(b"Subagent review complete.", start=start)
@@ -196,7 +207,9 @@ with tempfile.TemporaryDirectory(prefix="pi-artifact-pty-") as directory:
         saved_review = json.loads((work / f".pi/artifacts/reviews/{artifact['id']}.review.json").read_text())
         assert saved_review["lineComments"][0]["comment"] == "Verify the exact revision."
         # A generic positive review still must not unlock implementation.
+        start = len(output)
         command("!touch forbidden-after-review")
+        expect(b"blocks bash", start=start)
         assert not (work / "forbidden-after-review").exists()
         assert not (work / "approved.txt").exists()
         start = len(output)

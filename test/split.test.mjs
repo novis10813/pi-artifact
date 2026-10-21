@@ -189,6 +189,33 @@ test('F7 and /plan-pane toggle hide and reshow the pane without saving, discardi
   assert.equal(pane.hidden, false, 'shutdown resets hidden');
   await events.get('session_shutdown')({ reason: 'quit' }, f.ctx);
 }));
+test('/plan show reveals hidden or closed panes and keeps mounted-pane commands in chat', async () => fixture(async f => {
+  const commands = new Map(), events = new Map(), shortcuts = new Map(), entries = [];
+  let active = ['read', 'bash'];
+  const fullExtension = (await load('extension')).default;
+  f.ctx.isIdle = () => true; f.ctx.sessionManager = { getBranch: () => entries };
+  fullExtension({
+    registerTool() {}, registerCommand: (n, spec) => commands.set(n, spec),
+    registerShortcut: (key, spec) => shortcuts.set(key, spec),
+    on: (name, handler) => { const handlers = events.get(name) ?? []; handlers.push(handler); events.set(name, handlers); },
+    appendEntry: (customType, data) => entries.push({ type: 'custom', customType, data }),
+    getActiveTools: () => active, setActiveTools: tools => { active = tools; }, sendUserMessage() {},
+  });
+  const plan = args => commands.get('plan').handler(args, f.ctx);
+  try {
+    await plan('Keep commands in chat');
+    for (const state of ['hidden', 'mounted', 'closed']) {
+      if (state === 'hidden') shortcuts.get('f7').handler(f.ctx);
+      if (state === 'closed') await commands.get('plan-pane').handler('close', f.ctx);
+      await plan('show');
+      assert.notEqual(f.active().layoutRoot, f.original, state + ' is visible');
+      f.editor().handleInput('[200~chat-only[201~');
+      assert.equal(f.editor().getText(), 'chat-only', state + ' retains chat focus');
+      f.editor().setText('');
+      assert.equal(f.statuses.get('plan-pane'), 'plan');
+    }
+  } finally { for (const handler of events.get('session_shutdown') ?? []) await handler({}, f.ctx); }
+}));
 test(':wq hides the pane only after a successful save', async () => fixture(async f => {
   const pane = extension({ registerCommand() {}, on() {} });
   await pane.open(f.path, f.ctx);

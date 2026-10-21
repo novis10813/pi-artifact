@@ -223,7 +223,7 @@ export default function (pi: ExtensionAPI): void {
           if (!p.plan.state.artifactId) throw new Error("沒有進行中的計畫。先用 /plan <目標> 開始規劃。");
           const a = await p.store.read(p.plan.state.artifactId);
           // Explicit user intent reveals a hidden pane; background model updates still keep it hidden.
-          await pane.open(resolve(ctx.cwd, a.record.path), ctx); pane.show(ctx); return;
+          await pane.open(resolve(ctx.cwd, a.record.path), ctx); pane.show(ctx, false); return;
         }
         if (action === "off" && !p.plan.active) { ctx.ui.notify("目前不在 Plan Mode，沒有需要退出的計畫。", "info"); return; }
         idle(ctx);
