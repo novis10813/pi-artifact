@@ -22,14 +22,14 @@ If migrating from an older standalone `artifact.ts`, remove that extension from 
 /plan Describe the change
 ```
 
-This creates one durable artifact, opens it beside chat, enables planning restrictions, and asks the model to explore and revise that same document. Continue discussing in chat or switch to the document with **F6**, edit, return to Normal Mode with Esc or Ctrl+C, and save with **`:w`**. Model edits appear in a clean pane. Unsaved manual edits block model artifact changes rather than being overwritten.
+This creates one durable artifact from a spec template (goal and boundaries, context, requirements, work units, execution layers and boundaries), opens it beside chat, enables planning restrictions, and asks the model to explore and revise that same document. Continue discussing in chat or switch to the document with **F6**, edit, return to Normal Mode with Esc or Ctrl+C, and save with **`:w`**. Model edits appear in a clean pane. Unsaved manual edits block model artifact changes rather than being overwritten.
 
 When the model calls `request_plan_review`, its turn stops, but later questions, exploration and revisions remain available. Review is optional:
 
 | Command | Effect |
 | --- | --- |
 | `/plan review` | Ask the main model to call a foreground subagent to review the exact revision and summarize findings in chat. No manual review window. A positive result never authorizes execution. |
-| `/plan approve` | One confirmation approves the exact saved SHA-256 revision **and starts implementation immediately**, restoring the pre-plan tool set. The dialog explains the opening of main-agent writes, shell and workflow delegation. |
+| `/plan approve` | One confirmation approves the exact saved SHA-256 revision **and starts implementation immediately**, restoring the pre-plan tool set. The dialog explains the opening of main-agent writes, shell and workflow delegation. The main model is then asked to run the plan as one background pi-dynamic-workflows run: one worktree per work unit, checked repair with spec and code reviewers, committed work before every check, merges into an integration branch `plan/<rev>`, and a final report. It does not merge into your branch. |
 
 Approval checks the revision and unsaved draft before and after confirmation. Canceling, a changed revision or an unsaved draft leaves execution locked. Review does not need to complete before approval. The main model is instructed to compare the current revision after a subagent returns and mark old findings stale if it changed; this is not a stored review-pass gate.
 
@@ -54,7 +54,7 @@ Type `/plan ` for subcommands and descriptions, filtered by prefix, with unavail
 
 During planning and review, known read/search/web/question tools, artifact tools, task bookkeeping and context-management tools are allowed. The main model may call `subagent`, `list_subagents` and `subagent_status` directly if enabled before planning. Main-agent project write/edit, shell, arbitrary code wrappers (`codemode`), workflows, background-process tools and unknown tools remain denied. Questions and revisions are not frozen in review; edits return it to planning.
 
-**Subagent permissions are not restricted by Plan Mode.** Child tool sets and nested delegation are owned by the installed subagent extension and agent definitions. Asking a child not to write or run shells is an instruction, not enforcement. This version deliberately allows direct subagent calls without a read-only guarantee. `/plan review` requires an enabled subagent tool and asks for `spec-reviewer` or another available review agent. If unavailable, it reports the problem; you can still approve without review.
+**Subagent permissions are not restricted by Plan Mode.** Child tool sets and nested delegation are owned by the installed subagent extension and agent definitions. Asking a child not to write or run shells is an instruction, not enforcement. This version deliberately allows direct subagent calls without a read-only guarantee. `/plan review` requires an enabled subagent tool and asks the main agent to call five plan reviewers one by one: `logic-reviewer`, `system-reviewer`, `scope-reviewer`, `execution-reviewer` and `verification-reviewer`. Their definitions are not part of this package; install them in the subagent agents directory. Results are reported per lane, failed lanes are listed without retry, and all lanes are marked stale if the revision changed. If the subagent tool is unavailable, it reports the problem; you can still approve without review.
 
 The package filters the visible tool set and checks main-session `tool_call` events, including nested `ctx.executeTool` calls in that session. Interactive `!` shell commands are also checked. Execution restores only the tool set that was available before planning. These checks do not propagate into subagent child sessions.
 

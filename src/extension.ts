@@ -7,6 +7,61 @@ import { PlanController, PLAN_ENTRY } from "./plan.ts";
 import { openReviewUI } from "./review.ts";
 
 const PENDING_ENTRY = "pi-artifact:pending:v1";
+// Agent definitions live in the user's subagent directory, not in this package.
+const PLAN_REVIEWERS = [
+  ["logic-reviewer", "requirements and logic"],
+  ["system-reviewer", "existing system integration"],
+  ["scope-reviewer", "scope and design necessity"],
+  ["execution-reviewer", "execution and handoff"],
+  ["verification-reviewer", "acceptance and regression"],
+] as const;
+// Plan reviewers and the approve prompt refer to these section names.
+const planTemplate = (goal: string) => `# <Feature name> Spec
+
+> Replace the content in angle brackets and delete items that do not apply.
+> A work unit describes an acceptable outcome; it is not the same as one agent call.
+
+## 1. Goal and Boundaries
+
+- **Goal:** ${goal}
+- **In scope:** <What this change includes>
+- **Not doing:** <What this change explicitly excludes>
+
+## 2. Context and Required Decisions
+
+- **Current state:** <Relevant modules, interfaces and behavior, with code locations>
+- **Required decisions:** <Design and compatibility constraints the implementation must follow; separate existing facts from new design>
+- **Open questions:** <Questions that affect scope or design; resolve them before implementation, do not leave them for a worker to guess>
+
+## 3. Requirements and Acceptance
+
+| Requirement | Expected behavior | Acceptance scenario and pass condition |
+| ----------- | ----------------- | -------------------------------------- |
+| R1 | <Behavior in the normal case> | <Input, action and expected result> |
+| R2 | <Failure case, or existing behavior that must remain> | <Error result or regression check> |
+
+## 4. Work Units
+
+### W1｜<Name of the acceptable outcome>
+
+- **Outcome:** <What is delivered and which requirements it covers>
+- **Inputs and constraints:** <Required context, files, interfaces and decided design>
+- **Change scope:** <Which modules are expected to change, and what must not change>
+- **Dependencies and handoff:** <Which output of which unit is needed; which interface or outcome is handed to later units. Write "None" if there are no dependencies>
+- **Acceptance:** <Test location, executable and arguments (run without a shell), and expected result>
+- **Handoff and stop:** <Which changes and evidence to report; which problems require stopping to ask>
+
+<!-- Copy the format above for later units, numbered W2, W3. -->
+
+## 5. Execution and Completion
+
+- **Layers:** <Layer 1: W1, W2. Layer 2: W3 (needs W1). Units in a layer run in parallel; list files or interfaces that two units in one layer both change>
+- **Boundaries:**
+  - Always: <Actions a worker takes without asking>
+  - Ask first: <Actions that pause the workflow for user approval>
+  - Never: <Actions that stop the unit>
+- **Overall verification:** <Command run after each merge and its pass condition; manual checks before shipping>
+`;
 const text = (s: string, details: unknown = undefined) => ({ content: [{ type: "text" as const, text: s }], details });
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 
@@ -195,7 +250,7 @@ export default function (pi: ExtensionAPI): void {
     await p.plan.enter(a.record.id, pi.getActiveTools()); if (pending) setPending(); await open(a, ctx);
     loadout(); status(ctx);
     ctx.ui.notify(`已開始規劃 ${a.record.id}。模型會探索並修改同一份計畫，尚未允許實作。subagent 可直接呼叫，子代理權限未受 Plan Mode 限制。下一步：繼續討論，或 /plan review（選用）、/plan approve 核准並開始實作。`, "info");
-    pi.sendUserMessage(`Plan Mode enabled for ${a.record.id}. ${goal ?? "Use the conversation's requirements."} Explore and revise this SAME artifact. Do not implement. Submit with request_plan_review when ready.`);
+    pi.sendUserMessage(`Plan Mode enabled for ${a.record.id}. ${goal ?? "Use the conversation's requirements."} Explore and revise this SAME artifact. Keep the **Goal** item under ## 1. Goal and Boundaries updated with the requirements and decisions clarified in discussion; plan reviewers use it as the requirement baseline. Do not implement. Submit with request_plan_review when ready.`);
   };
   pi.registerCommand("plan", {
     description: "Plan Mode：/plan <目標> 開始規劃 · review 選用審查 · approve 核准並執行 · off 退出",
@@ -230,7 +285,7 @@ export default function (pi: ExtensionAPI): void {
         if (action === "goal" || action === "use") {
           if (p.plan.active) throw new Error(`已有進行中的計畫${p.plan.state.artifactId ? ` ${p.plan.state.artifactId}` : "（狀態損毀）"}。用 /plan off 退出後再開始新計畫。`);
           const goal = action === "goal" ? raw : undefined;
-          await start(action === "use" ? await p.store.resolve(value) : await p.store.create(`# Plan\n\n## Goal\n${goal}\n\n## Approach\n\n## Verification\n\n## Not doing\n`, goal), goal, ctx);
+          await start(action === "use" ? await p.store.resolve(value) : await p.store.create(planTemplate(goal!), goal), goal, ctx);
         } else if (action === "off") {
           if (!(await ctx.ui.confirm("退出 Plan Mode？", "將移除規劃限制並恢復原本的工具權限。計畫不會被核准或執行。"))) { ctx.ui.notify("已取消，仍在 Plan Mode。", "info"); return; }
           const tools = p.plan.off(); if (tools) pi.setActiveTools(tools); status(ctx);
@@ -243,9 +298,10 @@ export default function (pi: ExtensionAPI): void {
           ctx.ui.notify(`已提交 rev ${short(revision)}，將由主模型呼叫 subagent 審查。審查不是執行授權，可繼續提問與修改；修改後會回到規劃。子代理權限未受 Plan Mode 限制。`, "info");
           pi.sendUserMessage([
             `Plan review requested: ${artifactId}, exact revision ${revision}.`,
-            `Main agent: call subagent directly now, in foreground, using spec-reviewer (or another available review agent). Return its findings and your concise summary to this conversation. Do not open the manual /artifact line-review UI.`,
-            `Give the child a self-contained brief: review only the immutable plan snapshot at ${JSON.stringify(snapshot)}. Cwd: ${JSON.stringify(ctx.cwd)}. Read that snapshot and relevant repository files to check feasibility, scope, missing requirements, risks and verification. Report findings with severity and locations, and label the result with revision ${revision}. Do not modify files, run shells or delegate again. These are task instructions, NOT a Plan Mode tool restriction on the child.`,
-            `The main agent must read_artifact after the child returns and compare its current revision to ${revision}. If it changed, label the result stale; do not treat the old review as passing the new plan. A positive review never approves or starts implementation. If delegation fails, report the failure without fabricating a review. Continue Q&A or revisions, and wait for the user's /plan approve before implementation.`,
+            `Main agent: call subagent directly now, in foreground, once for each of these five plan reviewers: ${PLAN_REVIEWERS.map(([agent, lane]) => `${agent} (${lane})`).join(", ")}. Use separate calls; they need not run concurrently. Do not open the manual /artifact line-review UI.`,
+            `Give every child the same self-contained brief: review only the immutable plan snapshot at ${JSON.stringify(snapshot)}, revision ${revision}. Cwd: ${JSON.stringify(ctx.cwd)}. The requirement baseline is the **Goal** item under the snapshot's ## 1. Goal and Boundaries, maintained by the main agent; if it is missing or empty, the reviewer must say requirement coverage was not checked. Do not ask for a fixed number of findings. Do not modify files, run shells or delegate again. These are task instructions, NOT a Plan Mode tool restriction on the child.`,
+            `After all five return, read_artifact and compare its current revision to ${revision}. Report one section per lane, each labeled with revision ${revision} and one status: the reviewer's verdict (NO ISSUES, ISSUES or UNVERIFIED), FAILED if the call failed or returned no report, or STALE for every lane if the revision changed; do not treat a stale review as passing the new plan. Keep each reviewer's Issues and Needs confirmation items separate. If some reviewers fail, still report the others and list the failed lanes with the reason; do not retry automatically or fabricate a review.`,
+            `Do not edit the plan in response to findings unless the user asks. A positive review never approves or starts implementation. Continue Q&A or revisions, and wait for the user's /plan approve before implementation.`,
           ].join("\n"));
         } else if (action === "approve") {
           if (ctx.mode !== "tui") throw new Error("核准執行需要互動式確認視窗，請在 pi 終端介面中執行 /plan approve。");
@@ -257,7 +313,16 @@ export default function (pi: ExtensionAPI): void {
           // The draft or the file may have changed while the dialog was open.
           idle(ctx); await p.plan.approve(revision); if (pending) setPending(); loadout(); status(ctx);
           ctx.ui.notify(`已核准 rev ${short(revision)} 並開始實作。計畫變更會自動撤銷授權；完成後用 /plan done，或 /plan off 退出。`, "info");
-          pi.sendUserMessage(`Execute approved plan ${p.plan.state.artifactId}, exact revision ${revision}. Read it with read_artifact. Reuse existing tasks, set_verify, and reviewers. Do not silently broaden scope. If the plan changes, return to planning and obtain a fresh approval.`);
+          pi.sendUserMessage([
+            `Execute approved plan ${p.plan.state.artifactId}, exact revision ${revision}. Read it with read_artifact. Write one workflow script from it and run it in the background. If the git working tree has uncommitted changes, stop and ask the user first.`,
+            `1. Branches: create integration branch plan/${short(revision)} in its own worktree. For each §5 layer, create one worktree per unit from the integration branch with runCheck (git worktree add); worktree creation must be safe to rerun on resume. Run a layer's units with parallel().`,
+            `2. Units: label every call with the unit id (W1, W2…) and run every agent and check of a unit with cwd set to its worktree. Build gets only §1, the unit's §4 entry and §5 Boundaries; there is no planner. Then repairUntilPass: checks = the unit's Acceptance command; reviewers = agentType spec-reviewer (against the unit) and code-reviewer; repair = Build with the failure report.`,
+            `3. Commits: Build, every repair and the merge agent commit their changes before returning, without a co-author trailer. Every check, including each repairUntilPass round and each Overall verification, first runs runCheck with command "sh" and args ["-c", 'test -z "$(git status --porcelain)"'] in that worktree, so uncommitted work fails.`,
+            `4. Merge: after a layer passes, a merge agent in the integration worktree merges its unit branches, resolves conflicts from the plan, then runCheck the §5 Overall verification. The next layer branches from that result.`,
+            `5. Boundaries: Ask first → checkpoint(..., { headless: "abort" }); when it stops the run, ask the user, then continue with resumeFromRunId. Never → stop.`,
+            `6. Stop: if repairs run out, a check errors, or scope, a key design or acceptance would have to change, stop and report. Do not improvise; return to planning and obtain a fresh approval.`,
+            `7. Report: per requirement (R1, R2…) its acceptance result, plus the integration branch, test output and remaining limits. Do not merge into the user's branch or edit the approved plan; wait for the user.`,
+          ].join("\n"));
         } else if (action === "revise") {
           await p.plan.revise(); if (pending) setPending(); loadout(); status(ctx);
           ctx.ui.notify("已回到規劃模式，可以繼續提問與修改計畫；尚未允許實作", "info");
