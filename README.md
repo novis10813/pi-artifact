@@ -93,6 +93,8 @@ Project-local persistence:
 .pi/artifacts/reviews/<artifact-id>.review.json
 ```
 
+New artifacts store exactly the supplied Markdown content without automatically adding frontmatter. IDs, creation timestamps and paths remain in the index. Existing documents are not rewritten to remove frontmatter.
+
 IDs remain stable while content revisions change. Legacy indexes and nested content layouts are read additively without deleting or moving files. Existing content receives revision snapshots when read. Old unversioned approval is never trusted for execution. Comments are restored automatically only for their exact revision, so legacy unversioned comments remain on disk but are not silently applied to potentially changed lines.
 
 Plan state is stored as pi session custom entries and reconstructed from the active branch. Switching branches does not overwrite the working document with an older snapshot. Reloading or restoring an executing state, including legacy persisted `approved`, returns it to review with no execution grant. A fresh `/plan approve` confirmation is required. Corrupt state or unreadable content fails closed. `read_artifact` includes the revision in model-visible text and can read immutable historical snapshots; this package does not restore arbitrary project files.

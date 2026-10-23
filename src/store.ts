@@ -84,18 +84,16 @@ export class ArtifactStore {
     if (revisionOf(content) !== revision) throw new Error("Corrupt immutable artifact revision.");
     return content;
   }
-  async create(content: string, title?: string): Promise<Artifact> {
+  async create(content: string, _title?: string): Promise<Artifact> {
     validate(content);
     return withFileMutationQueue(this.indexPath, async () => {
       const index = await this.index(), createdAt = new Date().toISOString(), id = `art_${Date.now()}_${randomUUID().slice(0, 8)}`;
       const file = join(this.root, `${createdAt.slice(0, 10)}-${id}.md`);
-      const safeTitle = (title?.trim() || id).replace(/[\r\n]/g, " ");
-      const text = `---\nid: ${id}\ntitle: ${safeTitle}\ncreated: ${createdAt}\n---\n${content}`;
-      const revision = await this.snapshot(id, text);
-      await writeFile(file, text, { flag: "wx", mode: 0o600 });
+      const revision = await this.snapshot(id, content);
+      await writeFile(file, content, { flag: "wx", mode: 0o600 });
       const record: ArtifactRecord = { id, path: relative(this.cwd, file), createdAt, status: "draft", revision };
       index.artifacts.push(record); await atomic(this.indexPath, JSON.stringify(index, null, 2));
-      return { record, content: text, revision };
+      return { record, content, revision };
     });
   }
   async update(id: string, transform: (content: string) => string, expectedRevision?: string): Promise<Artifact> {

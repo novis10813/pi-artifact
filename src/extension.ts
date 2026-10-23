@@ -144,7 +144,7 @@ export default function (pi: ExtensionAPI): void {
     description: "Create a local artifact, or update the SAME active Plan Mode document. End your turn immediately and wait for /artifact review. Saving is not execution approval.",
     promptSnippet: "Use artifact tools for reviewable plan/spec/report documents. Read/edit/replace the existing artifact for revisions, not a new artifact per reply.",
     promptGuidelines: ["Pass full Markdown content, not a path or summary.", "After create_artifact succeeds, stop this turn for review. Generic artifact approval never authorizes implementation."],
-    parameters: Type.Object({ content: Type.String({ description: "Full artifact content" }), title: Type.Optional(Type.String({ description: "Optional artifact title" })) }),
+    parameters: Type.Object({ content: Type.String({ description: "Full artifact content" }), title: Type.Optional(Type.String({ description: "Accepted for compatibility; not written into document content" })) }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const p = ensure(ctx); guardDraft(p.plan.state.artifactId ?? "new artifact");
       // During implementation the approved document must not be silently replaced.

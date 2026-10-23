@@ -11,12 +11,23 @@ async function fixture(fn) {
 }
 test('create has stable identity and immutable content-addressed revisions', () => fixture(async (store) => {
   const a = await store.create('# First', 'plan\nno injected frontmatter');
-  assert.match(a.record.id, /^art_/); assert.match(a.content, /title: plan no injected frontmatter/);
+  assert.match(a.record.id, /^art_/); assert.equal(a.content, '# First');
+  assert.equal(await readFile(join(store.cwd, a.record.path), 'utf8'), '# First');
+  assert.equal(a.revision, revisionOf('# First'));
+  const index = JSON.parse(await readFile(store.indexPath, 'utf8'));
+  assert.equal(index.artifacts[0].id, a.record.id); assert.ok(index.artifacts[0].createdAt);
   const b = await store.update(a.record.id, text => text.replace('# First', '# Second'), a.revision);
   assert.equal(b.record.id, a.record.id); assert.notEqual(b.revision, a.revision);
   assert.equal(await store.revision(a.record.id, a.revision), a.content);
   assert.equal(await store.revision(a.record.id, b.revision), b.content);
   await assert.rejects(store.update(a.record.id, x => x, a.revision), /Stale/);
+}));
+test('create preserves empty content and caller-supplied frontmatter without adding metadata', () => fixture(async store => {
+  for (const content of ['', '---\ntitle: User content\n---\n# Body\n']) {
+    const artifact = await store.create(content);
+    assert.equal(artifact.content, content); assert.equal(artifact.revision, revisionOf(content));
+    assert.equal(await readFile(join(store.cwd, artifact.record.path), 'utf8'), content);
+  }
 }));
 test('exact edits use original text, reject empty, overlapping, ambiguous and missing edits', () => {
   assert.equal(exactEdits('abc def', [{ oldText: 'abc', newText: 'def' }, { oldText: 'def', newText: 'done' }]), 'def done');
