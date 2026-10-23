@@ -19,10 +19,10 @@ If migrating from an older standalone `artifact.ts`, remove that extension from 
 ## Plan workflow
 
 ```text
-/plan Describe the change
+/plan
 ```
 
-This creates one durable artifact from a spec template (goal and boundaries, context, requirements, work units, execution layers and boundaries), opens it beside chat, enables planning restrictions, and asks the model to explore and revise that same document. Continue discussing in chat or switch to the document with **F6**, edit, return to Normal Mode with Esc or Ctrl+C, and save with **`:w`**. Model edits appear in a clean pane. Unsaved manual edits block model artifact changes rather than being overwritten.
+This creates one durable artifact from a spec template (goal and boundaries, context, requirements, work units, execution layers and boundaries), opens it beside chat, and enables planning restrictions without triggering the model. Send your planning instructions as the next chat message; the model then explores and revises that same document, including its Goal. Continue discussing in chat or switch to the document with **F6**, edit, return to Normal Mode with Esc or Ctrl+C, and save with **`:w`**. Model edits appear in a clean pane. Unsaved manual edits block model artifact changes rather than being overwritten.
 
 When the model calls `request_plan_review`, its turn stops, but later questions, exploration and revisions remain available. Review is optional:
 
@@ -40,7 +40,8 @@ Other commands:
 | Command | Effect |
 | --- | --- |
 | `/plan use <id>` | Start Plan Mode with an existing artifact. |
-| `/plan` or `/plan status` | Show phase, identity, revision, usage and unavailable reasons. A bare `/plan` creates or executes nothing. |
+| `/plan` | Enter Plan Mode without triggering the model. If a plan is already active, show its status without replacing it. |
+| `/plan status` | Show phase, identity, revision, usage and unavailable reasons without creating a plan. |
 | `/plan show` | Open the active plan. |
 | `/plan revise` | Return to planning and revoke approval. |
 | `/plan done` | End implementation and block main-agent writes, shell and new subagent calls again. Edits do not reopen a finished plan; use `/plan revise`. |
@@ -48,7 +49,7 @@ Other commands:
 
 An active plan must be turned off before switching to another one. State changes require an idle agent and no unsaved document or document I/O. Approval requires an interactive confirmation dialog.
 
-Type `/plan ` for subcommands and descriptions, filtered by prefix, with unavailable reasons for the current phase. Reserved bare words are commands. Other text is a goal, including `review the auth module`. `use <id>` selects an existing artifact, and the removed `on` prefix reports an error. Phases are `planning`, `review`, `executing` and `done`, shown in the pane's bottom-right corner, not the global footer.
+Type `/plan ` for subcommands and descriptions, filtered by prefix, with unavailable reasons for the current phase. Planning instructions belong in subsequent chat messages, not in `/plan` arguments. `use <id>` selects an existing artifact without triggering the model, and the removed `on` prefix reports an error. Phases are `planning`, `review`, `executing` and `done`, shown in the pane's bottom-right corner, not the global footer.
 
 ### Tool policy and limits
 

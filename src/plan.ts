@@ -55,7 +55,7 @@ export class PlanController {
   }
   async sync(): Promise<boolean> {
     if (!this.active) return false;
-    if (this.corrupt) throw new Error("Corrupt persisted Plan Mode state. Use /plan off, then /plan <goal> to recover explicitly.");
+    if (this.corrupt) throw new Error("Corrupt persisted Plan Mode state. Use /plan off, then /plan to recover explicitly.");
     let revision: string;
     try { revision = (await this.store.read(this.state.artifactId!)).revision; }
     catch (error) {
@@ -69,7 +69,7 @@ export class PlanController {
     return true;
   }
   async submit() {
-    if (!this.active) throw new Error("沒有進行中的計畫。先用 /plan <目標> 開始規劃。");
+    if (!this.active) throw new Error("沒有進行中的計畫。先用 /plan 進入規劃模式。");
     await this.sync();
     if (this.state.phase === "executing") throw new Error("實作進行中。要修改計畫請先 /plan revise。");
     if (this.state.phase === "done") throw new Error("計畫已完成。要再修改請先 /plan revise，或 /plan off 退出。");
@@ -78,12 +78,12 @@ export class PlanController {
   /** Approves the exact saved revision and starts execution in one persisted step. Review is optional. */
   async approve(expectedRevision: string) {
     await this.sync();
-    if (!["planning", "review"].includes(this.state.phase)) throw new Error(this.state.phase === "executing" ? "這個版本已在實作中。" : this.state.phase === "done" ? "計畫已完成。要再實作請先 /plan revise。" : "沒有可核准的計畫。先用 /plan <目標> 開始規劃。");
+    if (!["planning", "review"].includes(this.state.phase)) throw new Error(this.state.phase === "executing" ? "這個版本已在實作中。" : this.state.phase === "done" ? "計畫已完成。要再實作請先 /plan revise。" : "沒有可核准的計畫。先用 /plan 進入規劃模式。");
     if (this.state.revision !== expectedRevision) throw new Error("計畫在確認期間已變更，未放行實作。請檢視新版本後再 /plan approve。");
     this.set({ ...this.state, phase: "executing", approval: { revision: expectedRevision, approvedAt: new Date().toISOString() } });
   }
   async revise() {
-    if (!this.active) throw new Error("沒有進行中的計畫。先用 /plan <目標> 開始規劃。");
+    if (!this.active) throw new Error("沒有進行中的計畫。先用 /plan 進入規劃模式。");
     await this.sync(); this.set({ ...this.state, phase: "planning", approval: undefined });
   }
   finish() {
@@ -108,6 +108,6 @@ export class PlanController {
     if (this.state.phase === "done") return `Plan Mode: done. Active plan ${this.state.artifactId}, revision ${this.state.revision}. Implementation is finished and project writes/shell are blocked again. Edits do not reopen this plan; do not call request_plan_review. Only the user's /plan revise reopens it, or /plan off exits.`;
     return `Plan Mode: ${this.state.phase}. Active plan ${this.state.artifactId}, revision ${this.state.revision}. ${this.state.phase === "executing"
       ? "Implement only this approved revision. Reuse existing task, verification and reviewer tools. Plan content changes revoke permission before the next tool call."
-      : "Do not implement project changes or run shells/workflows/codemode. Explore with read/grep/find/ls/web tools, and call subagent directly for exploration or review. Ask child agents not to write or run shells, but do not claim this is enforced: Plan Mode does not restrict child tools or nested delegation. Subagent conclusions never approve or start execution. Summarize findings in the main conversation and label them with the reviewed revision; after edits, old conclusions are stale. Read and update the SAME artifact using read_artifact/edit_artifact/replace_artifact, not a new plan per reply. Save is not approval. Keep answering questions and revising during review; any edit returns the plan to planning and invalidates earlier review conclusions. When ready call request_plan_review and end your turn. Only the user's /plan approve authorizes execution; it approves this exact revision and starts implementation."}`;
+      : "Do not implement project changes or run shells/workflows/codemode. Explore with read/grep/find/ls/web tools, and call subagent directly for exploration or review. Ask child agents not to write or run shells, but do not claim this is enforced: Plan Mode does not restrict child tools or nested delegation. Subagent conclusions never approve or start execution. Summarize findings in the main conversation and label them with the reviewed revision; after edits, old conclusions are stale. Read and update the SAME artifact using read_artifact/edit_artifact/replace_artifact, not a new plan per reply. Keep the **Goal** item under ## 1. Goal and Boundaries updated with the requirements and decisions clarified in discussion; plan reviewers use it as the requirement baseline. Save is not approval. Keep answering questions and revising during review; any edit returns the plan to planning and invalidates earlier review conclusions. When ready call request_plan_review and end your turn. Only the user's /plan approve authorizes execution; it approves this exact revision and starts implementation."}`;
   }
 }

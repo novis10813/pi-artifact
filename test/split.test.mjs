@@ -158,7 +158,7 @@ test('F7 and /plan-pane toggle hide and reshow the pane without saving, discardi
   const commands = new Map(), shortcuts = new Map(), events = new Map();
   const pane = extension({ registerCommand: (n, spec) => commands.set(n, spec), registerShortcut: (k, spec) => shortcuts.set(k, spec), on: (n, h) => events.set(n, h) });
   assert.deepEqual([...shortcuts.keys()], ['f7']);
-  shortcuts.get('f7').handler(f.ctx); assert.match(f.notices.at(-1).text, /No plan pane open\. Start with \/plan <goal>/);
+  shortcuts.get('f7').handler(f.ctx); assert.match(f.notices.at(-1).text, /No plan pane open\. Start with \/plan or/);
   // pi forwards extension shortcuts to custom editors through onExtensionShortcut.
   const bind = () => { f.editor().onExtensionShortcut = data => data === '\x1b[18~' ? (shortcuts.get('f7').handler(f.ctx), true) : false; };
   await pane.open(f.path, f.ctx); bind();
@@ -203,7 +203,7 @@ test('/plan show reveals hidden or closed panes and keeps mounted-pane commands 
   });
   const plan = args => commands.get('plan').handler(args, f.ctx);
   try {
-    await plan('Keep commands in chat');
+    await plan('');
     for (const state of ['hidden', 'mounted', 'closed']) {
       if (state === 'hidden') shortcuts.get('f7').handler(f.ctx);
       if (state === 'closed') await commands.get('plan-pane').handler('close', f.ctx);

@@ -153,8 +153,15 @@ with tempfile.TemporaryDirectory(prefix="pi-artifact-pty-") as directory:
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 36, 180, 0, 0))
         os.killpg(child.pid, signal.SIGWINCH)
         pump(0.3)
-        command("/plan Build the tested feature")
-        expect(b"PLAN review", timeout=15)
+        start = len(output)
+        command("/plan")
+        expect(b"PLAN planning", start=start)
+        assert not (work / "probe.jsonl").exists(), "/plan must not call the model"
+        initial_index = json.loads((work / ".pi/artifacts/index.json").read_text())
+        initial_path = work / initial_index["artifacts"][0]["path"]
+        assert initial_path.read_text().startswith("# <Feature name> Spec\n")
+        command("Build the tested feature")
+        expect(b"PLAN review", timeout=15, start=start)
         index = json.loads((work / ".pi/artifacts/index.json").read_text())
         assert len(index["artifacts"]) == 1
         artifact = index["artifacts"][0]

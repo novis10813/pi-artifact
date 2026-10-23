@@ -84,7 +84,7 @@ export default function installPane(pi: ExtensionAPI, changed?: (ctx: ExtensionC
     ctx.ui.notify(`Plan pane hidden${document.dirty ? " · unsaved draft kept" : ""} · F7 or /plan-pane toggle to show`, "info");
   };
   const toggle = (ctx: ExtensionContext) => {
-    if (!document) throw new Error("No plan pane open. Start with /plan <goal> or /plan-pane open <path.md>.");
+    if (!document) throw new Error("No plan pane open. Start with /plan or /plan-pane open <path.md>.");
     if (saving || refreshing) throw new Error("Document I/O in progress. Try again shortly.");
     if (view?.attached) hide(ctx); else show(ctx, false);
   };

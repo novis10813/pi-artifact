@@ -16,14 +16,14 @@ const PLAN_REVIEWERS = [
   ["verification-reviewer", "acceptance and regression"],
 ] as const;
 // Plan reviewers and the approve prompt refer to these section names.
-const planTemplate = (goal: string) => `# <Feature name> Spec
+const planTemplate = () => `# <Feature name> Spec
 
 > Replace the content in angle brackets and delete items that do not apply.
 > A work unit describes an acceptable outcome; it is not the same as one agent call.
 
 ## 1. Goal and Boundaries
 
-- **Goal:** ${goal}
+- **Goal:** <What this change should accomplish>
 - **In scope:** <What this change includes>
 - **Not doing:** <What this change explicitly excludes>
 
@@ -242,20 +242,19 @@ export default function (pi: ExtensionAPI): void {
   ];
   const usage = () => [
     plan?.active ? `目前：PLAN ${plan.state.phase} · ${plan.state.artifactId} · rev ${short(plan.state.revision)}${plan.state.phase === "executing" ? "（已核准實作）" : "（尚未允許實作）"}` : "目前：未在 Plan Mode",
-    "/plan <目標>　開始規劃",
+    "/plan　進入規劃模式，再於對話輸入指示",
     ...SUBCOMMANDS.map(c => `/plan ${c.name}　${c.description}${c.blocked() ? `（不可用：${c.blocked()}）` : ""}`),
   ].join("\n");
-  const start = async (a: Artifact, goal: string | undefined, ctx: ExtensionCommandContext) => {
+  const start = async (a: Artifact, ctx: ExtensionCommandContext) => {
     const p = ensure(ctx);
     await p.plan.enter(a.record.id, pi.getActiveTools()); if (pending) setPending(); await open(a, ctx);
     loadout(); status(ctx);
-    ctx.ui.notify(`已開始規劃 ${a.record.id}。模型會探索並修改同一份計畫，尚未允許實作。subagent 可直接呼叫，子代理權限未受 Plan Mode 限制。下一步：繼續討論，或 /plan review（選用）、/plan approve 核准並開始實作。`, "info");
-    pi.sendUserMessage(`Plan Mode enabled for ${a.record.id}. ${goal ?? "Use the conversation's requirements."} Explore and revise this SAME artifact. Keep the **Goal** item under ## 1. Goal and Boundaries updated with the requirements and decisions clarified in discussion; plan reviewers use it as the requirement baseline. Do not implement. Submit with request_plan_review when ready.`);
+    ctx.ui.notify(`已進入規劃模式 ${a.record.id}。請在接下來的對話輸入規劃指示，尚未允許實作。subagent 可直接呼叫，子代理權限未受 Plan Mode 限制。`, "info");
   };
   pi.registerCommand("plan", {
-    description: "Plan Mode：/plan <目標> 開始規劃 · review 選用審查 · approve 核准並執行 · off 退出",
+    description: "Plan Mode：/plan 進入規劃模式 · review 選用審查 · approve 核准並執行 · off 退出",
     getArgumentCompletions: prefix => {
-      // Free-form goal text is never forced into a subcommand.
+      // Arguments after a subcommand are not completion candidates.
       if (/\s/.test(prefix)) return null;
       const items = SUBCOMMANDS.filter(c => c.name.startsWith(prefix)).map(c => {
         const reason = c.blocked();
@@ -268,24 +267,23 @@ export default function (pi: ExtensionAPI): void {
       commandBusy = true;
       try {
         const p = ensure(ctx), raw = args.trim(), [first = "", ...rest] = raw.split(/\s+/), value = rest.join(" ");
-        // Reserved words are subcommands only when bare (or `use <id>`); anything else is a goal.
-        const action = !raw ? "status" : first === "on" ? "on" : first === "use" && rest.length === 1 ? "use" : !rest.length && SUBCOMMANDS.some(c => c.name === first) || raw === "execute" ? first : "goal";
+        const action = !raw ? (p.plan.active ? "status" : "start") : first === "on" ? "on" : first === "use" && rest.length === 1 ? "use" : !rest.length && SUBCOMMANDS.some(c => c.name === first) || raw === "execute" ? first : "invalid";
+        if (action === "invalid") throw new Error("用 /plan 進入規劃模式，再於對話輸入指示。子指令請見 /plan status。");
         if (action === "status") { ctx.ui.notify(usage(), "info"); return; }
         if (action === "use" && !value) throw new Error("用法：/plan use <artifact-id>");
-        if (action === "on") throw new Error("/plan on 已移除。直接用 /plan <目標> 開始規劃。");
+        if (action === "on") throw new Error("/plan on 已移除。直接用 /plan 進入規劃模式。");
         if (action === "execute") throw new Error("/plan execute 已移除。用 /plan approve 核准目前版本並立即開始實作。");
         if (action === "show") {
-          if (!p.plan.state.artifactId) throw new Error("沒有進行中的計畫。先用 /plan <目標> 開始規劃。");
+          if (!p.plan.state.artifactId) throw new Error("沒有進行中的計畫。先用 /plan 進入規劃模式。");
           const a = await p.store.read(p.plan.state.artifactId);
           // Explicit user intent reveals a hidden pane; background model updates still keep it hidden.
           await pane.open(resolve(ctx.cwd, a.record.path), ctx); pane.show(ctx, false); return;
         }
         if (action === "off" && !p.plan.active) { ctx.ui.notify("目前不在 Plan Mode，沒有需要退出的計畫。", "info"); return; }
         idle(ctx);
-        if (action === "goal" || action === "use") {
+        if (action === "start" || action === "use") {
           if (p.plan.active) throw new Error(`已有進行中的計畫${p.plan.state.artifactId ? ` ${p.plan.state.artifactId}` : "（狀態損毀）"}。用 /plan off 退出後再開始新計畫。`);
-          const goal = action === "goal" ? raw : undefined;
-          await start(action === "use" ? await p.store.resolve(value) : await p.store.create(planTemplate(goal!), goal), goal, ctx);
+          await start(action === "use" ? await p.store.resolve(value) : await p.store.create(planTemplate()), ctx);
         } else if (action === "off") {
           if (!(await ctx.ui.confirm("退出 Plan Mode？", "將移除規劃限制並恢復原本的工具權限。計畫不會被核准或執行。"))) { ctx.ui.notify("已取消，仍在 Plan Mode。", "info"); return; }
           const tools = p.plan.off(); if (tools) pi.setActiveTools(tools); status(ctx);
@@ -306,7 +304,7 @@ export default function (pi: ExtensionAPI): void {
         } else if (action === "approve") {
           if (ctx.mode !== "tui") throw new Error("核准執行需要互動式確認視窗，請在 pi 終端介面中執行 /plan approve。");
           await p.plan.sync(); const revision = p.plan.state.revision;
-          if (!["planning", "review"].includes(p.plan.state.phase) || !revision) throw new Error(p.plan.state.phase === "executing" ? "這個版本已在實作中。" : p.plan.state.phase === "done" ? "計畫已完成。要再實作請先 /plan revise。" : "沒有可核准的計畫。先用 /plan <目標> 開始規劃。");
+          if (!["planning", "review"].includes(p.plan.state.phase) || !revision) throw new Error(p.plan.state.phase === "executing" ? "這個版本已在實作中。" : p.plan.state.phase === "done" ? "計畫已完成。要再實作請先 /plan revise。" : "沒有可核准的計畫。先用 /plan 進入規劃模式。");
           const a = await p.store.read(p.plan.state.artifactId!); await open(a, ctx);
           const ok = await ctx.ui.confirm("核准並開始實作？", `${a.record.id}\nSHA-256 ${revision}\n確認後立即開始實作這個確切版本，並開放主模型的專案寫入、shell 指令與 workflow 等委派。subagent 已可呼叫，其子代理權限未受 Plan Mode 限制。計畫之後若變更，授權會自動撤銷。`);
           if (!ok) { ctx.ui.notify("已取消核准，仍在規劃中，尚未允許實作。", "info"); return; }

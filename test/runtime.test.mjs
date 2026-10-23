@@ -61,7 +61,7 @@ test('/plan review requests revision-bound subagent review in chat; legacy line 
   const a = await f.store.create('# Context\n\nsecond line', 'Review');
   const line = a.content.split('\n').indexOf('# Context') + 2;
   await f.store.review(a.record.id, a.revision, 'rejected', '', [{ line, comment: 'keep this comment' }]);
-  await f.command(`use ${a.record.id}`); f.ctx.mode = 'tui';
+  await f.command(`use ${a.record.id}`); assert.equal(f.messages.length, 0); f.ctx.mode = 'tui';
   await f.command('review');
   assert.equal(f.reviewFrames.length, 0, 'no manual line-review UI'); assert.match(last(f), /已提交 rev .*subagent 審查。審查不是執行授權/);
   const request = f.messages.at(-1);
@@ -78,7 +78,7 @@ test('/plan review requests revision-bound subagent review in chat; legacy line 
   assert.equal((await f.tool('write')).block, true);
 }));
 test('/plan review reports unavailable subagent and clears a prior create stop guard when available', () => fixture(async f => {
-  await f.command('feature');
+  await f.command('');
   f.active().splice(f.active().indexOf('subagent'), 1);
   const count = f.messages.length;
   await f.command('review'); assert.match(last(f), /subagent 工具未啟用.*略過審查/); assert.equal(f.messages.length, count);
@@ -93,10 +93,14 @@ test('/plan review reports unavailable subagent and clears a prior create stop g
 test('runtime registers historical schemas plus read/replace/submit, updates same plan and keeps review open', () => fixture(async f => {
   assert.deepEqual(Object.keys(f.tools.get('create_artifact').parameters.properties), ['content', 'title']);
   assert.deepEqual(Object.keys(f.tools.get('edit_artifact').parameters.properties), ['artifactId', 'edits']);
-  await f.command('implement user feature');
-  const [a] = await f.store.list(); assert.ok(a); assert.ok(f.messages.at(-1).includes(a.id)); assert.match(f.messages.at(-1), /Keep the \*\*Goal\*\* item under ## 1\. Goal and Boundaries updated/);
-  const created = (await f.store.read(a.id)).content; assert.match(created, /- \*\*Goal:\*\* implement user feature\n/);
-  for (const section of ['## 2. Context and Required Decisions', '## 3. Requirements and Acceptance', '## 4. Work Units', '## 5. Execution and Completion', '  - Ask first:']) assert.ok(created.includes(section), section); assert.match(last(f), /已開始規劃.*尚未允許實作/);
+  await f.command('');
+  const [a] = await f.store.list(); assert.ok(a); assert.equal(f.messages.length, 0);
+  const context = await f.emit('before_agent_start', { prompt: 'implement user feature' });
+  assert.ok(context.message.content.includes(a.id));
+  assert.match(context.message.content, /Keep the \*\*Goal\*\* item under ## 1\. Goal and Boundaries updated/);
+  const created = (await f.store.read(a.id)).content; assert.match(created, /- \*\*Goal:\*\* <What this change should accomplish>\n/);
+  assert.doesNotMatch(created, /implement user feature|^---/);
+  for (const section of ['## 2. Context and Required Decisions', '## 3. Requirements and Acceptance', '## 4. Work Units', '## 5. Execution and Completion', '  - Ask first:']) assert.ok(created.includes(section), section); assert.match(last(f), /已進入規劃模式.*尚未允許實作/);
   assert.ok(!f.active().includes('codemode')); assert.ok(f.active().includes('subagent'));
   assert.match(last(f), /子代理權限未受 Plan Mode 限制/);
   const before = await f.tool('read_artifact', { artifactId: a.id }); assert.match(before.content[0].text, /Goal/);
@@ -123,11 +127,11 @@ test('runtime registers historical schemas plus read/replace/submit, updates sam
   await f.command('status'); assert.match(last(f), /PLAN planning/);
 }));
 test('approve confirms once, rechecks the revision, and cannot be bypassed by chat or generic review', () => fixture(async f => {
-  await f.command('feature'); const [a] = await f.store.list();
+  await f.command(''); const [a] = await f.store.list();
   await f.store.review(a.id, (await f.store.read(a.id)).revision, 'approved');
   f.ctx.mode = 'tui';
   await f.command('execute'); assert.match(last(f), /\/plan execute 已移除.*\/plan approve/);
-  await f.command('on another'); assert.match(last(f), /\/plan on 已移除.*\/plan <目標>/);
+  await f.command('on another'); assert.match(last(f), /\/plan on 已移除.*\/plan/);
   await f.emit('input', { text: 'approved go implement it', source: 'interactive' });
   assert.equal((await f.tool('bash')).block, true);
   f.setConfirm(false); await f.command('approve'); assert.match(last(f), /已取消核准.*尚未允許實作/); assert.equal((await f.tool('write')).block, true);
@@ -148,7 +152,7 @@ test('approve confirms once, rechecks the revision, and cannot be bypassed by ch
 }));
 test('runtime user shell and nested call hooks enforce policy; off is explicit and restores tools', () => fixture(async f => {
   await f.command('off'); assert.match(last(f), /目前不在 Plan Mode/);
-  await f.command('feature');
+  await f.command('');
   const shell = await f.emit('user_bash', { command: 'rm -rf target' });
   assert.equal(shell.result.exitCode, 1); assert.match(shell.result.output, /blocks bash/);
   const nested = await f.emit('tool_call', { toolName: 'write', input: {}, parentToolCallId: 'wrapper' });
@@ -159,7 +163,7 @@ test('runtime user shell and nested call hooks enforce policy; off is explicit a
   assert.deepEqual(f.active(), ['read', 'bash', 'write', 'codemode', 'subagent']);
 }));
 test('runtime tree restore uses active branch and invalidates execution after reload', () => fixture(async f => {
-  await f.command('feature'); const planningBranch = structuredClone(f.entries);
+  await f.command(''); const planningBranch = structuredClone(f.entries);
   f.ctx.mode = 'tui'; await f.command('approve');
   assert.equal(await f.emit('tool_call', { toolName: 'write', input: {} }), undefined);
   await f.emit('session_start'); assert.equal((await f.tool('write')).block, true);
@@ -168,8 +172,8 @@ test('runtime tree restore uses active branch and invalidates execution after re
   await f.command('status'); assert.match(last(f), /PLAN planning/);
 }));
 test('revise and done give explicit feedback without granting execution', () => fixture(async f => {
-  await f.command('revise'); assert.match(last(f), /沒有進行中的計畫.*\/plan <目標>/);
-  await f.command('feature'); f.ctx.mode = 'tui'; await f.command('approve');
+  await f.command('revise'); assert.match(last(f), /沒有進行中的計畫.*\/plan/);
+  await f.command(''); f.ctx.mode = 'tui'; await f.command('approve');
   await f.command('revise'); assert.equal(last(f), '已回到規劃模式，可以繼續提問與修改計畫；尚未允許實作');
   assert.equal((await f.tool('write')).block, true);
   await f.command('done'); assert.match(last(f), /沒有正在實作的計畫/);
@@ -185,31 +189,42 @@ test('revise and done give explicit feedback without granting execution', () => 
   await assert.rejects(f.tool('create_artifact', { content: '# hijack' }), /實作進行中/);
   assert.match((await f.store.read((await f.store.list())[0].id)).content, /Goal/);
 }));
-test('corrupt plan state: off reports tools were not restored; goal start names the corrupt state', () => fixture(async f => {
+test('corrupt plan state: off reports tools were not restored; use names the corrupt state', () => fixture(async f => {
   f.entries.push({ type: 'custom', customType: 'pi-artifact:plan:v1', data: 'bad' }); await f.emit('session_start');
-  await f.command('new goal'); assert.match(last(f), /狀態損毀.*\/plan off/);
+  await f.command('use art_existing'); assert.match(last(f), /狀態損毀.*\/plan off/);
   await f.command('off'); assert.match(last(f), /工具未還原.*\/reload/); assert.equal(f.notices.at(-1).type, 'warning');
 }));
-test('bare /plan shows usage only; reserved words in goal text start a plan; completions are phase-aware', () => fixture(async f => {
+test('bare /plan enters without a model turn; repeated entry preserves the plan; completions are phase-aware', () => fixture(async f => {
   const complete = prefix => f.commands.get('plan').getArgumentCompletions(prefix);
-  assert.match(f.commands.get('plan').description, /\/plan <目標>.*approve 核准並執行/);
-  await f.command(''); assert.match(last(f), /未在 Plan Mode[\s\S]*\/plan <目標>[\s\S]*approve.*核准.*不可用：沒有進行中的計畫/);
-  assert.equal((await f.store.list()).length, 0, 'bare /plan creates nothing');
+  assert.match(f.commands.get('plan').description, /\/plan 進入規劃模式.*approve 核准並執行/);
+  await f.command('status'); assert.match(last(f), /未在 Plan Mode[\s\S]*approve.*不可用：沒有進行中的計畫/);
+  assert.equal((await f.store.list()).length, 0, 'status creates nothing');
   const names = complete('').map(i => i.value);
   assert.deepEqual(names, ['status', 'show', 'review', 'approve', 'revise', 'done', 'off', 'use']);
   assert.ok(!names.includes('execute') && !names.includes('on'));
   assert.deepEqual(complete('re').map(i => i.value), ['review', 'revise']);
   assert.match(complete('ap')[0].description, /目前不可用：沒有進行中的計畫/);
-  assert.equal(complete('fix the'), null, 'free goal text is not intercepted'); assert.equal(complete('zzz'), null);
-  await f.command('review the auth module');
-  const [a] = await f.store.list(); assert.match((await f.store.read(a.id)).content, /- \*\*Goal:\*\* review the auth module\n/);
+  assert.equal(complete('fix the'), null); assert.equal(complete('zzz'), null);
+  await f.command('review the auth module'); assert.match(last(f), /用 \/plan 進入規劃模式/);
+  assert.equal((await f.store.list()).length, 0, 'inline prompts do not create plans');
+  await f.command('');
+  assert.match(last(f), /已進入規劃模式.*接下來的對話輸入規劃指示/);
+  const [a] = await f.store.list(), saved = await f.store.read(a.id);
+  assert.match(saved.content, /^# <Feature name> Spec/);
+  assert.equal(f.messages.length, 0, 'entry does not trigger the model');
+  assert.ok(!f.active().includes('bash')); assert.ok(!f.active().includes('write'));
+  assert.equal((await f.tool('write')).block, true);
   assert.doesNotMatch(complete('ap')[0].description, /不可用/);
   assert.match(complete('done')[0].description, /不可用：沒有正在實作/);
-  await f.command('another goal'); assert.match(last(f), /已有進行中的計畫.*\/plan off/);
+  await f.command(''); assert.match(last(f), /PLAN planning/);
+  assert.equal((await f.store.list()).length, 1);
+  assert.deepEqual(await f.store.read(a.id), saved, 'repeated entry preserves content and revision');
+  assert.equal(f.messages.length, 0);
+  await f.command('use ' + a.id); assert.match(last(f), /已有進行中的計畫.*\/plan off/);
   await f.command('use'); assert.match(last(f), /用法：\/plan use/);
 }));
 test('busy agent and noninteractive execution are refused; create stop guard survives restore', () => fixture(async f => {
-  f.setIdle(false); await f.command('unsafe'); assert.match(last(f), /模型仍在回應/);
+  f.setIdle(false); await f.command(''); assert.match(last(f), /模型仍在回應/);
   f.setIdle(true);
   const result = await f.tool('create_artifact', { content: '# Report', title: 'report' });
   assert.ok(result.details.artifactId); assert.equal(result.terminate, true);
