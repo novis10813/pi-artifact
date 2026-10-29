@@ -50,6 +50,27 @@ async function fixture(fn) {
   finally { active.stop(); await rm(dir, { recursive: true, force: true }); }
 }
 const walk = (box, predicate) => predicate(box) ? box : box.children.map(child => walk(child, predicate)).find(Boolean);
+async function withExtension(f, fn) {
+  const commands = new Map(), events = new Map(), entries = [], tools = new Map();
+  let active = ['read', 'bash', 'write'], confirmation = true;
+  const selections = [], choices = [], confirms = [];
+  f.ctx.isIdle = () => true; f.ctx.sessionManager = { getBranch: () => entries };
+  f.ctx.ui.confirm = async (...args) => { confirms.push(args); return confirmation; };
+  f.ctx.ui.select = async (title, options) => {
+    selections.push({ title, options }); const choice = choices.shift();
+    return typeof choice === 'function' ? choice(options) : choice;
+  };
+  (await load('extension')).default({
+    registerTool: t => tools.set(t.name, t), registerCommand: (n, spec) => commands.set(n, spec), registerShortcut() {},
+    on: (n, h) => { const handlers = events.get(n) ?? []; handlers.push(h); events.set(n, handlers); },
+    appendEntry: (customType, data) => entries.push({ type: 'custom', customType, data }),
+    getActiveTools: () => active, setActiveTools: t => { active = t; }, sendUserMessage() {},
+  });
+  const { ArtifactStore } = await load('store'); const store = new ArtifactStore(f.dir);
+  try { await fn({ store, choices, selections, confirms, tools, active: () => active,
+    command: args => commands.get('plan').handler(args, f.ctx), setConfirm: value => { confirmation = value; } }); }
+  finally { for (const handler of events.get('session_shutdown') ?? []) await handler({}, f.ctx); }
+}
 
 test('actual fullscreen layout allocates half width and retains original chat root', async () => fixture(async f => {
   f.editor().setText('chat draft');
@@ -121,19 +142,19 @@ test('renderer swap is detected through pi stable proxy without using stale rend
   f.setActive(new tui.TuiAltScreen(f.terminal, true)); assert.equal(view.attached, false);
   view.unmount(); assert.equal(f.active().layoutRoot, f.original);
 }));
-test('command integration protects dirty drafts and saves/copies explicitly', async () => fixture(async f => {
+test('pane API protects dirty drafts and saves/copies explicitly without registering commands', async () => fixture(async f => {
   const commands = new Map(), events = new Map();
-  extension({ registerCommand: (name, spec) => commands.set(name, spec), on: (name, handler) => events.set(name, handler) });
-  const command = args => commands.get('plan-pane').handler(args, f.ctx);
-  await command(`open ${f.path}`);
+  const pane = extension({ registerCommand: (name, spec) => commands.set(name, spec), on: (name, handler) => events.set(name, handler) });
+  assert.equal(commands.size, 0);
+  await pane.open(f.path, f.ctx);
   assert.ok(f.statuses.has('plan-pane'));
   f.editor().handleInput('\x1b[17~'); f.editor().handleInput('i'); f.editor().handleInput('draft');
-  await command('close'); assert.match(f.notices.at(-1).text, /Unsaved draft/);
+  assert.throws(() => pane.close(), /Unsaved draft/);
   assert.deepEqual(events.get('session_before_switch')({}, f.ctx), { cancel: true });
-  const copy = join(f.dir, 'draft copy.md'); await command(`copy ${copy}`); assert.ok((await readFile(copy, 'utf8')).startsWith('draft'));
-  await command('save'); assert.ok((await readFile(f.path, 'utf8')).startsWith('draft'));
+  const copy = join(f.dir, 'draft copy.md'); await pane.document.saveCopy(copy); assert.ok((await readFile(copy, 'utf8')).startsWith('draft'));
+  await pane.save(); assert.ok((await readFile(f.path, 'utf8')).startsWith('draft'));
   assert.equal(f.statuses.get('plan-pane'), 'plan');
-  await command('close'); assert.equal(f.active().layoutRoot, f.original); assert.equal(f.statuses.size, 0);
+  pane.close(); assert.equal(f.active().layoutRoot, f.original); assert.equal(f.statuses.size, 0);
   await events.get('session_shutdown')({}, f.ctx);
 }));
 test('save reports concurrent saves and keeps a written file successful when plan sync fails', async () => fixture(async f => {
@@ -154,7 +175,7 @@ test('save reports concurrent saves and keeps a written file successful when pla
   assert.ok(f.notices.at(-1).type === 'error'); assert.equal(pane.dirty, true, 'failed write keeps the draft');
   await rm(f.path, { recursive: true });
 }));
-test('F7 and /plan-pane toggle hide and reshow the pane without saving, discarding or moving the cursor', async () => fixture(async f => {
+test('F7 and pane toggle hide and reshow the pane without saving, discarding or moving the cursor', async () => fixture(async f => {
   const commands = new Map(), shortcuts = new Map(), events = new Map();
   const pane = extension({ registerCommand: (n, spec) => commands.set(n, spec), registerShortcut: (k, spec) => shortcuts.set(k, spec), on: (n, h) => events.set(n, h) });
   assert.deepEqual([...shortcuts.keys()], ['f7']);
@@ -178,9 +199,9 @@ test('F7 and /plan-pane toggle hide and reshow the pane without saving, discardi
   assert.deepEqual([rect.x, rect.width], [80, 80], 'reshown 50/50');
   assert.equal(pane.document.buffer.text, text); assert.deepEqual([pane.document.buffer.row, pane.document.buffer.col], cursor);
   assert.equal(pane.document.buffer.mode, 'insert'); assert.equal(f.editor().getText(), 'chat');
-  await commands.get('plan-pane').handler('toggle', f.ctx); assert.equal(pane.hidden, true);
-  await commands.get('plan-pane').handler('toggle', f.ctx); assert.equal(pane.hidden, false);
-  await commands.get('plan-pane').handler('toggle', f.ctx); await commands.get('plan-pane').handler('discard', f.ctx);
+  pane.toggle(f.ctx); assert.equal(pane.hidden, true);
+  pane.toggle(f.ctx); assert.equal(pane.hidden, false);
+  pane.toggle(f.ctx); pane.discardDraft();
   assert.equal(pane.hidden, false); assert.equal(pane.document, undefined);
   await pane.open(f.path, f.ctx); pane.hide(f.ctx); pane.close(); assert.equal(pane.hidden, false, 'close() resets hidden');
   await pane.open(f.path, f.ctx); pane.hide(f.ctx); assert.equal(events.get('session_before_switch')({}, f.ctx), undefined);
@@ -189,7 +210,7 @@ test('F7 and /plan-pane toggle hide and reshow the pane without saving, discardi
   assert.equal(pane.hidden, false, 'shutdown resets hidden');
   await events.get('session_shutdown')({ reason: 'quit' }, f.ctx);
 }));
-test('/plan show reveals hidden or closed panes and keeps mounted-pane commands in chat', async () => fixture(async f => {
+test('/plan open reveals hidden artifacts and keeps mounted-pane commands in chat', async () => fixture(async f => {
   const commands = new Map(), events = new Map(), shortcuts = new Map(), entries = [];
   let active = ['read', 'bash'];
   const fullExtension = (await load('extension')).default;
@@ -204,10 +225,11 @@ test('/plan show reveals hidden or closed panes and keeps mounted-pane commands 
   const plan = args => commands.get('plan').handler(args, f.ctx);
   try {
     await plan('');
-    for (const state of ['hidden', 'mounted', 'closed']) {
+    const { ArtifactStore } = await load('store');
+    const [record] = await new ArtifactStore(f.dir).list();
+    for (const state of ['hidden', 'mounted']) {
       if (state === 'hidden') shortcuts.get('f7').handler(f.ctx);
-      if (state === 'closed') await commands.get('plan-pane').handler('close', f.ctx);
-      await plan('show');
+      await plan(`open ${record.path}`);
       assert.notEqual(f.active().layoutRoot, f.original, state + ' is visible');
       f.editor().handleInput('[200~chat-only[201~');
       assert.equal(f.editor().getText(), 'chat-only', state + ' retains chat focus');
@@ -216,6 +238,50 @@ test('/plan show reveals hidden or closed panes and keeps mounted-pane commands 
     }
   } finally { for (const handler of events.get('session_shutdown') ?? []) await handler({}, f.ctx); }
 }));
+test('/plan discard only removes the visible artifact and confirms dirty draft loss plus Plan Mode exit', () => fixture(f => withExtension(f, async x => {
+  const a = await x.store.create('# A'), b = await x.store.create('# B');
+  await x.command('discard'); assert.equal(x.confirms.length, 0);
+  await x.command(`open ${a.record.path}`);
+  f.editor().handleInput('\x1b[17~'); f.editor().handleInput('i'); f.editor().handleInput('UNSAVED');
+  await x.command('toggle'); await x.command('discard');
+  assert.match(f.notices.at(-1).text, /不會刪除/); assert.equal(x.confirms.length, 0);
+  assert.equal((await x.store.read(a.record.id)).record.status, 'draft');
+  await x.command('toggle'); x.setConfirm(false); await x.command('discard');
+  assert.equal((await x.store.read(a.record.id)).record.status, 'draft');
+  assert.ok(f.ctx.ui.getEditorComponent());
+  x.setConfirm(true); await x.command('discard');
+  assert.equal((await x.store.read(a.record.id)).record.status, 'abandoned');
+  assert.equal(await readFile(join(f.dir, a.record.path), 'utf8'), '# A');
+  assert.equal(await x.store.revision(a.record.id, a.revision), '# A');
+  assert.ok(x.confirms.at(-1)[1].includes('未儲存的修改會被放棄'));
+  assert.equal(f.ctx.ui.getEditorComponent(), undefined);
+  assert.equal((await x.store.read(b.record.id)).record.status, 'draft');
+  await x.command(''); const current = (await x.store.list()).at(-1);
+  assert.ok(!x.active().includes('write'));
+  await x.command('discard');
+  assert.ok(x.confirms.at(-1)[1].includes('退出 Plan Mode'));
+  assert.equal((await x.store.read(current.id)).record.status, 'abandoned');
+  assert.ok(x.active().includes('write')); await x.command('status');
+  assert.match(f.notices.at(-1).text, /未在 Plan Mode/);
+})));
+test('/plan open resolves dirty switching with save, cancel and explicit draft loss; discussions can finish outside Plan Mode', () => fixture(f => withExtension(f, async x => {
+  const a = await x.store.create('# A'), b = await x.store.create('# B');
+  await x.command(`open ${a.record.path}`);
+  f.editor().handleInput('\x1b[17~'); f.editor().handleInput('i'); f.editor().handleInput('SAVED');
+  x.choices.push('取消'); await x.command(`open ${b.record.path}`);
+  assert.ok(f.ctx.ui.getEditorComponent()); assert.equal(await readFile(join(f.dir, a.record.path), 'utf8'), '# A');
+  x.choices.push('儲存'); await x.command(`open ${b.record.path}`);
+  assert.equal(await readFile(join(f.dir, a.record.path), 'utf8'), 'SAVED# A');
+  f.editor().handleInput('\x1b[17~'); f.editor().handleInput('i'); f.editor().handleInput('LOST');
+  x.choices.push('放棄修改'); await x.command(`open ${a.record.path}`);
+  assert.equal(await readFile(join(f.dir, b.record.path), 'utf8'), '# B');
+  assert.deepEqual(x.active(), ['read', 'bash', 'write'], 'opening never enables planning');
+  await x.command('done'); assert.equal((await x.store.read(a.record.id)).record.progress, 'done');
+  await x.command('status'); assert.match(f.notices.at(-1).text, /已完成/);
+  assert.ok(x.active().includes('write'), 'finishing a discussion never activates restrictions');
+  await x.command(`copy ${join(f.dir, 'outside copy.md')}`);
+  await x.command('open outside copy.md'); assert.match(f.notices.at(-1).text, /No artifact found/);
+})));
 test(':wq hides the pane only after a successful save', async () => fixture(async f => {
   const pane = extension({ registerCommand() {}, on() {} });
   await pane.open(f.path, f.ctx);
@@ -289,9 +355,9 @@ test('right-pane click never steals keyboard focus from inline host selectors', 
   f.active().requestRender = request; view.unmount();
 }));
 test('graceful reload recovers a dirty draft privately after host resets the editor', async () => fixture(async f => {
-  const events = new Map(); let command;
-  extension({ registerCommand: (_name, spec) => { command = spec; }, on: (name, handler) => events.set(name, handler) });
-  await command.handler(`open ${f.path}`, f.ctx);
+  const events = new Map();
+  const pane = extension({ on: (name, handler) => events.set(name, handler) });
+  await pane.open(f.path, f.ctx);
   f.editor().handleInput('\x1b[17~'); f.editor().handleInput('i'); f.editor().handleInput('unsaved中文');
   f.ctx.ui.setEditorComponent(undefined); // actual /reload sequence
   const old = process.env.PI_CODING_AGENT_DIR;
@@ -309,9 +375,7 @@ test('graceful reload recovers a dirty draft privately after host resets the edi
     if (old === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = old;
   }
 }));
-test('non-TUI mode refuses commands without claiming the editor', async () => fixture(async f => {
-  let command;
-  extension({ registerCommand: (_name, spec) => { command = spec; }, on() {} });
-  await command.handler(`open ${f.path}`, { ...f.ctx, mode: 'print' });
-  assert.match(f.notices.at(-1).text, /interactive fullscreen/); assert.equal(f.ctx.ui.getEditorComponent(), undefined);
+test('non-TUI mode refuses opening without claiming the editor', async () => fixture(async f => {
+  const pane = extension({ on() {} });
+  await assert.rejects(pane.open(f.path, { ...f.ctx, mode: 'print' }), /interactive fullscreen/); assert.equal(f.ctx.ui.getEditorComponent(), undefined);
 }));

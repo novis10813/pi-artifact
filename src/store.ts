@@ -5,7 +5,9 @@ import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { MAX_DOCUMENT_BYTES } from "./document.ts";
 
 export type ArtifactStatus = "draft" | "in_review" | "changes_requested" | "approved" | "abandoned";
-export interface ArtifactRecord { id: string; path: string; createdAt: string; status: ArtifactStatus; revision?: string; }
+export type ArtifactProgress = "discussing" | "reviewing" | "implementing" | "done";
+export interface ArtifactRecord { id: string; path: string; createdAt: string; status: ArtifactStatus; revision?: string; progress?: ArtifactProgress; }
+export const progressOf = (record: ArtifactRecord): ArtifactProgress => record.progress ?? (record.status === "in_review" ? "reviewing" : "discussing");
 export interface Artifact { record: ArtifactRecord; content: string; revision: string; }
 export interface Review {
   artifactId: string; targetPath: string; revision: string;
@@ -65,16 +67,33 @@ export class ArtifactStore {
     if (record.revision !== revision) {
       // Never trust a legacy review's mtime or approval after disk content changes.
       record.revision = revision;
-      if (record.status !== "abandoned") record.status = "draft";
+      if (record.status !== "abandoned") {
+        record.status = "draft";
+        if (progressOf(record) !== "done") record.progress = "discussing";
+      }
       await atomic(this.indexPath, JSON.stringify(index, null, 2));
     }
     return { record: { ...record }, content, revision };
   }
-  async list(): Promise<ArtifactRecord[]> { return withFileMutationQueue(this.indexPath, async () => (await this.index()).artifacts.map(a => ({ ...a }))); }
+  async list(): Promise<ArtifactRecord[]> { return withFileMutationQueue(this.indexPath, async () => (await this.index()).artifacts.map(a => ({ ...a, progress: progressOf(a) }))); }
+  async setProgress(id: string, progress: ArtifactProgress, expectedRevision?: string): Promise<void> {
+    await withFileMutationQueue(this.indexPath, async () => {
+      const index = await this.index(), artifact = await this.current(index, id);
+      if (artifact.record.status === "abandoned") throw new Error("Artifact is abandoned.");
+      if (expectedRevision && artifact.revision !== expectedRevision) throw new Error("Stale artifact revision. Read the current artifact before updating.");
+      index.artifacts.find(a => a.id === id)!.progress = progress;
+      await atomic(this.indexPath, JSON.stringify(index, null, 2));
+    });
+  }
+  async filePath(id: string): Promise<string> {
+    const record = (await this.list()).find(a => a.id === id && a.status !== "abandoned");
+    if (!record) throw new Error("Artifact not found or removed.");
+    return this.path(record);
+  }
   async read(id: string): Promise<Artifact> { return withFileMutationQueue(this.indexPath, async () => this.current(await this.index(), id)); }
   async resolve(target: string): Promise<Artifact> {
     const records = await this.list();
-    const record = records.find(a => a.id === target || resolve(this.cwd, a.path) === resolve(this.cwd, target));
+    const record = records.find(a => a.status !== "abandoned" && (a.id === target || resolve(this.cwd, a.path) === resolve(this.cwd, target)));
     if (!record) throw new Error(`No artifact found for: ${target}`);
     return this.read(record.id);
   }
@@ -91,7 +110,7 @@ export class ArtifactStore {
       const file = join(this.root, `${createdAt.slice(0, 10)}-${id}.md`);
       const revision = await this.snapshot(id, content);
       await writeFile(file, content, { flag: "wx", mode: 0o600 });
-      const record: ArtifactRecord = { id, path: relative(this.cwd, file), createdAt, status: "draft", revision };
+      const record: ArtifactRecord = { id, path: relative(this.cwd, file), createdAt, status: "draft", revision, progress: "discussing" };
       index.artifacts.push(record); await atomic(this.indexPath, JSON.stringify(index, null, 2));
       return { record, content, revision };
     });
@@ -107,6 +126,7 @@ export class ArtifactStore {
       await atomic(path, content);
       const record = index.artifacts.find(a => a.id === id)!;
       record.revision = revision; record.status = "draft";
+      if (content !== previous.content && progressOf(record) !== "done") record.progress = "discussing";
       await atomic(this.indexPath, JSON.stringify(index, null, 2));
       return { record: { ...record }, content, revision };
     });

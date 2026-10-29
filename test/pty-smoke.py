@@ -25,8 +25,12 @@ with tempfile.TemporaryDirectory(prefix="pi-artifact-pty-") as directory:
     agent = work / "agent"
     agent.mkdir()
     (agent / "settings.json").write_text(json.dumps({"quietStartup": True, "theme": "dark", "tuiMode": "fullscreen"}))
-    plan = work / "plan.md"
+    artifact_root = work / ".pi/artifacts"
+    artifact_root.mkdir(parents=True)
+    plan = artifact_root / "discussion.md"
     plan.write_text("# Plan\n原始計畫\n" + "long plan line\n" * 150)
+    (artifact_root / "index.json").write_text(json.dumps({"artifacts": [{"id": "art_discussion", "path": ".pi/artifacts/discussion.md", "createdAt": "2026-01-01", "status": "draft"}]}))
+    (work / "ordinary.md").write_text("# Not an artifact")
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 160, 0, 0))
     env = {**os.environ, "PI_CODING_AGENT_DIR": str(agent), "PI_OFFLINE": "1", "TERM": "xterm-256color", "PI_TUI_WRITE_LOG": str(work / "ansi.log")}
@@ -74,8 +78,16 @@ with tempfile.TemporaryDirectory(prefix="pi-artifact-pty-") as directory:
     try:
         expect(b"\x1b[?1049h")
         pump(2)
-        command("/plan-pane open plan.md")
-        expect(b"plan.md")
+        command("/plan open ordinary.md")
+        expect(b"No artifact found")
+        # Slash argument completions must preserve 'open' and use only the index.
+        os.write(master, b"/plan open .pi/artifacts/d")
+        pump(0.5)
+        os.write(master, b"\t")
+        pump(0.7)
+        os.write(master, b"\r")
+        pump(0.7)
+        expect(b"discussion.md")
         expect(b"F6 focus")
         # Switch to document, insert literal CJK and paste content, Ctrl+C to normal mode, :w.
         os.write(master, b"\x1b[17~")
@@ -148,7 +160,28 @@ with tempfile.TemporaryDirectory(prefix="pi-artifact-pty-") as directory:
         os.write(master, b":wq\r")
         expect(b"Plan pane hidden", start=start)
         assert "wq-saved" in plan.read_text(), ":wq hid before saving the document"
-        command("/plan-pane close")
+        # A hidden pane is not a discard target.
+        command("/plan discard")
+        assert json.loads((artifact_root / "index.json").read_text())["artifacts"][0]["status"] != "abandoned"
+        command("/plan toggle")
+        # /plan list opens the selected discussion without enabling Plan Mode.
+        start = len(output)
+        command("/plan list")
+        expect("未完成的 artifacts".encode(), start=start)
+        action_start = len(output)
+        os.write(master, b"\r")
+        expect("開啟".encode(), start=action_start)
+        os.write(master, b"\r")
+        pump(0.7)
+        assert b"PLAN planning" not in output[start:]
+        # Remove through the no-argument command. Files and revisions stay on disk.
+        start = len(output)
+        command("/plan discard")
+        expect("移除 artifact？".encode(), start=start)
+        os.write(master, b"\r")
+        expect("Artifact 已從清單移除".encode(), start=start)
+        assert json.loads((artifact_root / "index.json").read_text())["artifacts"][0]["status"] == "abandoned"
+        assert plan.exists()
         # Drive the COMPLETE lifecycle with a deterministic offline model.
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 36, 180, 0, 0))
         os.killpg(child.pid, signal.SIGWINCH)
@@ -158,34 +191,34 @@ with tempfile.TemporaryDirectory(prefix="pi-artifact-pty-") as directory:
         expect(b"PLAN planning", start=start)
         assert not (work / "probe.jsonl").exists(), "/plan must not call the model"
         initial_index = json.loads((work / ".pi/artifacts/index.json").read_text())
-        initial_path = work / initial_index["artifacts"][0]["path"]
+        initial_path = work / initial_index["artifacts"][-1]["path"]
         assert initial_path.read_text().startswith("# <Feature name> Spec\n")
         command("Build the tested feature")
         expect(b"PLAN review", timeout=15, start=start)
         index = json.loads((work / ".pi/artifacts/index.json").read_text())
-        assert len(index["artifacts"]) == 1
-        artifact = index["artifacts"][0]
+        assert len(index["artifacts"]) == 2
+        artifact = index["artifacts"][-1]
         plan_path = work / artifact["path"]
         assert "Implement one verified change." in plan_path.read_text()
         assert not (work / "denied-nested.txt").exists(), "Nested tool bypassed Plan policy"
         assert "test_write" in (work / "probe.jsonl").read_text(), "Nested unsafe probe did not execute its gate"
-        # Hide from chat focus, then explicitly /plan show the same retained document.
+        # Hide from chat focus, then explicitly reopen the same retained artifact.
         start = len(output)
         os.write(master, b"\x1b[18~")
         expect(b"Plan pane hidden", start=start)
         start = len(output)
-        command("/plan show")
+        command(f"/plan open {artifact['path']}")
         expect(b"F7 hide", start=start)
         expect(b"PLAN review", start=start)
-        # Repeated show on the mounted pane must keep chat focus, not redirect pasted commands.
-        command("/plan show")
+        # Repeated open on the mounted pane must keep chat focus, not redirect pasted commands.
+        command(f"/plan open {artifact['path']}")
         start = len(output)
         command("!touch forbidden-shell")
         expect(b"blocks bash", start=start)
         assert not (work / "forbidden-shell").exists()
-        # Closed -> show follows the same focus contract as hidden -> show.
-        command("/plan-pane close")
-        command("/plan show")
+        # Toggle then open follows the same focus contract.
+        command("/plan toggle")
+        command(f"/plan open {artifact['path']}")
         start = len(output)
         command("!touch forbidden-after-show")
         expect(b"blocks bash", start=start)
@@ -201,19 +234,9 @@ with tempfile.TemporaryDirectory(prefix="pi-artifact-pty-") as directory:
         assert "revisions" in dispatch["task"] and "exact revision" in dispatch["task"]
         assert not (work / "approved.txt").exists(), "Subagent PASS unlocked implementation"
         assert b"Artifact Review" not in output[start:], "/plan review must not open the manual line-review UI"
-        # Legacy /artifact line review remains available and stores comments.
-        start = len(output)
-        command(f"/artifact review {artifact['id']}")
-        expect(b"Artifact Review", start=start)
-        os.write(master, b"c")
-        pump(0.2)
-        os.write(master, b"\x1b[200~Verify the exact revision.\x1b[201~\r")
-        pump(0.3)
-        os.write(master, b"ay")
-        pump(0.8)
-        saved_review = json.loads((work / f".pi/artifacts/reviews/{artifact['id']}.review.json").read_text())
-        assert saved_review["lineComments"][0]["comment"] == "Verify the exact revision."
-        # A generic positive review still must not unlock implementation.
+        assert not (artifact_root / "reviews").exists(), "Agent review must not write legacy records"
+        assert json.loads((artifact_root / "index.json").read_text())["artifacts"][-1]["progress"] == "reviewing"
+        # Positive subagent findings still must not unlock implementation.
         start = len(output)
         command("!touch forbidden-after-review")
         expect(b"blocks bash", start=start)
@@ -234,7 +257,9 @@ with tempfile.TemporaryDirectory(prefix="pi-artifact-pty-") as directory:
         command("!touch forbidden-after-change")
         assert not (work / "forbidden-after-change").exists()
         expect(b"PLAN planning", start=start)
-        command("/plan-pane close")
+        command("/plan done")
+        assert json.loads((artifact_root / "index.json").read_text())["artifacts"][-1]["progress"] == "done"
+        command("/plan toggle")
         os.write(master, b"\x04")
         pump(1)
         if child.poll() is None:
@@ -242,7 +267,7 @@ with tempfile.TemporaryDirectory(prefix="pi-artifact-pty-") as directory:
         child.wait(timeout=8)
         assert child.returncode == 0, f"Unexpected pi exit: {child.returncode}"
         assert b"Failed to load extension" not in output
-        print("PTY smoke passed: real pi split/CJK/Ctrl+C/:w/:wq/F7/search/word motions/resize, offline model updates same plan, main-session nested+shell policy, subagent review dispatch, one-step approve+execute, legacy line review, approved write, content-change revocation, clean exit.")
+        print("PTY smoke passed: real pi split/CJK/Ctrl+C/:w/:wq/F7/search/word motions/resize, offline model updates same plan, main-session nested+shell policy, subagent review dispatch, one-step approve+execute, artifact-only Tab/list/discard, persisted progress, approved write, content-change revocation, clean exit.")
     finally:
         if child.poll() is None:
             os.killpg(child.pid, signal.SIGKILL)

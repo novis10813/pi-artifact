@@ -2,9 +2,8 @@ import { resolve } from "node:path";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import installPane from "./pane-controller.ts";
-import { ArtifactStore, exactEdits, type Artifact } from "./store.ts";
+import { ArtifactStore, exactEdits, progressOf, type Artifact, type ArtifactRecord } from "./store.ts";
 import { PlanController, PLAN_ENTRY } from "./plan.ts";
-import { openReviewUI } from "./review.ts";
 
 const PENDING_ENTRY = "pi-artifact:pending:v1";
 // Agent definitions live in the user's subagent directory, not in this package.
@@ -84,8 +83,20 @@ export default function (pi: ExtensionAPI): void {
     pi.setActiveTools(plan.restricted ? [...new Set([...previous.filter(x => plan!.allowsPlanningTool(x)), "read_artifact", "edit_artifact", "replace_artifact", "request_plan_review"])] : previous);
   };
   const pane = installPane(pi, async ctx => {
+    // Reading records a saved/external content change even outside Plan Mode.
+    const record = await paneRecord();
+    if (record) await store!.read(record.id);
     if (plan?.active) { await plan.sync(); loadout(); status(ctx); }
   }, () => plan?.active ? `PLAN ${plan.state.phase}` : "");
+  const paneRecord = async () => {
+    if (!pane.document || !store) return undefined;
+    // DocumentSession resolves symlinks; compare canonical targets rather than display paths.
+    const records = await store.list();
+    for (const record of records) {
+      if (record.status === "abandoned") continue;
+      try { if (await store.filePath(record.id) === pane.document.path) return record; } catch { /* stale entry */ }
+    }
+  };
   const restore = async (_event: unknown, ctx: ExtensionContext) => {
     const p = ensure(ctx);
     const branch = ctx.sessionManager.getBranch();
@@ -97,8 +108,7 @@ export default function (pi: ExtensionAPI): void {
       loadout();
       if (ctx.mode === "tui" && p.plan.state.artifactId) {
         try {
-          const a = await p.store.read(p.plan.state.artifactId);
-          await pane.open(resolve(ctx.cwd, a.record.path), ctx);
+          await pane.open(await p.store.filePath(p.plan.state.artifactId), ctx);
         } catch (error) { ctx.ui.notify(`Plan retained without pane: ${errorText(error)}`, "warning"); }
       }
     }
@@ -107,33 +117,14 @@ export default function (pi: ExtensionAPI): void {
   pi.on("session_start", restore);
   pi.on("session_tree", restore);
   const setPending = (id?: string) => { pi.appendEntry(PENDING_ENTRY, id ?? null); pending = id; };
-  const open = async (a: Artifact, ctx: ExtensionContext) => {
+  const open = async (a: Artifact, ctx: ExtensionContext, reveal = false) => {
     if (ctx.mode !== "tui") return;
-    try { await pane.open(resolve(ctx.cwd, a.record.path), ctx); }
+    try { await pane.open(await store!.filePath(a.record.id), ctx, reveal); }
     catch (error) { ctx.ui.notify(`Artifact saved, pane unavailable: ${errorText(error)}`, "warning"); }
   };
   const idle = (ctx: ExtensionContext) => {
     if (!ctx.isIdle()) throw new Error("模型仍在回應。等它結束或先中斷（Esc），再執行這個指令。");
-    if (pane.busy || pane.dirty) throw new Error("右側有未儲存編輯。先 :w 儲存、/plan-pane copy 或 discard，再變更 Plan Mode 狀態。");
-  };
-  const review = async (a: Artifact, ctx: ExtensionContext) => {
-    if (ctx.mode !== "tui") throw new Error("Interactive terminal review required. The artifact is available through read_artifact in other modes.");
-    idle(ctx);
-    const previous = await store!.read(a.record.id);
-    const lines = previous.content.split(/\r?\n/);
-    let frontmatterEnd = 0;
-    if (lines[0] === "---") { const end = lines.indexOf("---", 1); if (end >= 0) frontmatterEnd = end + 1; }
-    const previousReview = await store!.readReview(a.record.id, previous.revision);
-    const initialComments = new Map<number, string>((previousReview?.lineComments ?? []).map(c => [c.line, c.comment]));
-    const title = lines.slice(1, Math.max(1, frontmatterEnd - 1)).find(line => line.startsWith("title:"))?.slice(6).trim() || a.record.id;
-    const result = await openReviewUI(ctx, { id: a.record.id, title, lines, frontmatterEnd, initialComments });
-    if (!result || result.decision === "abandoned") return;
-    const saved = await store!.review(a.record.id, previous.revision, result.decision, result.overallComment, [...result.lineComments].map(([line, comment]) => ({ line, comment })));
-    if (pending === a.record.id) setPending();
-    // Line review is a compatibility feature; it never changes Plan Mode phase or authorization.
-    if (plan?.active && plan.state.artifactId === a.record.id) ctx.ui.notify(`Line review ${result.decision} saved. It does not change Plan Mode or authorize execution; use /plan approve for that.`, "info");
-    pi.sendUserMessage(`Artifact review result:\n${JSON.stringify({ artifactId: a.record.id, revision: previous.revision, approved: result.decision === "approved", comments: saved.lineComments.map(c => ({ line: c.line, text: lines[c.line - 1]?.trim() ? lines[c.line - 1] : lines.slice(0, c.line - 1).findLast(line => line.trim()) ?? "", comment: c.comment })), overallComment: saved.overallComment ?? "", executionApproved: false })}`);
-    loadout(); status(ctx);
+    if (pane.busy || pane.dirty) throw new Error("右側有未儲存編輯或文件 I/O。先 /plan save 儲存，或用 /plan open 處理草稿，再變更 Plan Mode 狀態。");
   };
   const guardDraft = (id: string) => {
     // Conservatively protect every visible dirty draft, including one opened by path.
@@ -141,9 +132,9 @@ export default function (pi: ExtensionAPI): void {
   };
   pi.registerTool({
     name: "create_artifact", label: "Create Artifact",
-    description: "Create a local artifact, or update the SAME active Plan Mode document. End your turn immediately and wait for /artifact review. Saving is not execution approval.",
+    description: "Create a local artifact, or update the SAME active Plan Mode document. End your turn so the user can inspect or edit the document in the right pane. Saving is not execution approval.",
     promptSnippet: "Use artifact tools for reviewable plan/spec/report documents. Read/edit/replace the existing artifact for revisions, not a new artifact per reply.",
-    promptGuidelines: ["Pass full Markdown content, not a path or summary.", "After create_artifact succeeds, stop this turn for review. Generic artifact approval never authorizes implementation."],
+    promptGuidelines: ["Pass full Markdown content, not a path or summary.", "After create_artifact succeeds, stop this turn for user feedback. Opening or saving an artifact never authorizes implementation."],
     parameters: Type.Object({ content: Type.String({ description: "Full artifact content" }), title: Type.Optional(Type.String({ description: "Accepted for compatibility; not written into document content" })) }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const p = ensure(ctx); guardDraft(p.plan.state.artifactId ?? "new artifact");
@@ -154,7 +145,7 @@ export default function (pi: ExtensionAPI): void {
       if (p.plan.active) await p.plan.submit();
       if (ctx.hasUI) setPending(a.record.id);
       await open(a, ctx); loadout(); status(ctx);
-      const next = p.plan.active ? "The user may keep discussing, /plan review (optional), or /plan approve to approve and start implementation." : "Review with /artifact.";
+      const next = p.plan.active ? "The user may keep discussing, /plan review (optional), or /plan approve to approve and start implementation." : "The user can inspect/edit the right pane, or reopen with /plan list, and continue in chat.";
       return { ...text(`Artifact created: ${a.record.id}\nSTOP: End your turn now. ${next} Saving/review is not execution authorization.`, { artifactId: a.record.id, revision: a.revision }), terminate: true };
     },
   });
@@ -197,48 +188,89 @@ export default function (pi: ExtensionAPI): void {
       return { ...text(`Plan ${p.plan.state.artifactId} submitted. End this turn. The user may keep discussing, run /plan review (optional), or /plan approve to approve and start implementation.`, { artifactId: p.plan.state.artifactId, revision: p.plan.state.revision }), terminate: true };
     },
   });
-  pi.registerCommand("artifact", {
-    description: "Open existing artifact in the split pane; review, list or abandon. /artifact [id|path] | review <id> | abandon <id>",
-    handler: async (args, ctx) => {
-      if (commandBusy) { ctx.ui.notify("Another artifact/plan command is active.", "warning"); return; }
-      commandBusy = true;
-      try {
-        const p = ensure(ctx), raw = args.trim();
-        if (raw.startsWith("review ")) { await review(await p.store.resolve(raw.slice(7)), ctx); return; }
-        if (raw.startsWith("abandon ")) {
-          idle(ctx); const a = await p.store.resolve(raw.slice(8));
-          if (p.plan.active && a.record.id === p.plan.state.artifactId) throw new Error("Use /plan off before abandoning its artifact.");
-          if (await ctx.ui.confirm("Abandon artifact?", a.record.id)) await p.store.abandon(a.record.id); return;
-        }
-        let target = raw;
-        if (!target) {
-          const rows = (await p.store.list()).filter(a => a.status !== "abandoned");
-          if (!rows.length) { ctx.ui.notify("No artifacts.", "info"); return; }
-          target = await ctx.ui.select("Artifacts (including prior approvals)", rows.map(a => `${a.id} ${a.status} ${a.path}`)) ?? "";
-          if (!target) return; target = target.split(" ")[0];
-        }
-        const a = await p.store.resolve(target); await open(a, ctx);
-        const action = await ctx.ui.select(a.record.id, ["Review with line comments", "Keep editing", "Abandon"]);
-        if (action === "Review with line comments") await review(a, ctx);
-        if (action === "Abandon") {
-          idle(ctx); if (p.plan.active && p.plan.state.artifactId === a.record.id) throw new Error("Use /plan off first.");
-          if (await ctx.ui.confirm("Abandon artifact?", a.record.id)) await p.store.abandon(a.record.id);
-        }
-      } catch (error) { ctx.ui.notify(errorText(error), "error"); }
-      finally { commandBusy = false; }
-    },
-  });
+  const progressLabel = (a: ArtifactRecord) => ({ discussing: "討論中", reviewing: "審查中", implementing: "實作中", done: "已完成" })[progressOf(a)];
+  const requireIdle = (ctx: ExtensionContext) => {
+    if (!ctx.isIdle()) throw new Error("模型仍在回應。等它結束或先中斷（Esc），再執行這個指令。");
+    if (pane.busy) throw new Error("文件 I/O 進行中，請稍後再試。");
+  };
+  const resolveDraft = async (ctx: ExtensionContext): Promise<boolean> => {
+    requireIdle(ctx);
+    if (!pane.dirty) return true;
+    const choice = await ctx.ui.select("右側有未儲存修改", ["儲存", "放棄修改", "取消"]);
+    requireIdle(ctx);
+    if (choice === "儲存") return pane.save();
+    if (choice === "放棄修改") { pane.discardDraft(); return true; }
+    return false;
+  };
+  const openArtifact = async (id: string, ctx: ExtensionContext) => {
+    requireIdle(ctx);
+    if (ctx.mode !== "tui") throw new Error("開啟 artifact 需要互動式 fullscreen 介面。");
+    const path = await store!.filePath(id);
+    // Reopening the same artifact also lets the user explicitly abandon an unsaved draft.
+    if (!(await resolveDraft(ctx))) return;
+    await pane.open(path, ctx, true); await pane.refresh();
+    if (pending === id) setPending();
+    status(ctx);
+  };
+  const discardArtifact = async (record: ArtifactRecord, ctx: ExtensionContext) => {
+    requireIdle(ctx);
+    const current = await paneRecord(), isOpen = current?.id === record.id;
+    const active = plan!.active && plan!.state.artifactId === record.id;
+    const warning = `${record.path}\n只從清單移除，保留文件與歷史版本。${isOpen && pane.dirty ? "\n目前未儲存的修改會被放棄。" : ""}${active ? "\n此文件是目前計畫，將退出 Plan Mode 並恢復原本工具權限，不會核准或執行計畫。" : ""}`;
+    if (!(await ctx.ui.confirm("移除 artifact？", warning))) return;
+    requireIdle(ctx);
+    await store!.abandon(record.id);
+    if (isOpen) pane.discardDraft();
+    if (active) { const tools = plan!.off(); if (tools) pi.setActiveTools(tools); }
+    if (pending === record.id) setPending();
+    status(ctx); ctx.ui.notify("Artifact 已從清單移除，文件與歷史版本保留。", "info");
+  };
+  const listArtifacts = async (ctx: ExtensionCommandContext) => {
+    requireIdle(ctx);
+    if (ctx.mode !== "tui") throw new Error("Artifact 清單需要互動式終端介面。");
+    let completed = false;
+    while (true) {
+      const rows = (await store!.list()).filter(a => a.status !== "abandoned" && (progressOf(a) === "done") === completed).reverse();
+      const labels = rows.map(a => `${progressLabel(a)} · ${a.path}`);
+      const toggle = completed ? "顯示未完成" : "顯示已完成";
+      const choice = await ctx.ui.select(completed ? "已完成的 artifacts" : "未完成的 artifacts", [...labels, toggle]);
+      if (choice === undefined) return;
+      if (choice === toggle) { completed = !completed; continue; }
+      const record = rows[labels.indexOf(choice)];
+      if (!record) return;
+      const action = await ctx.ui.select(record.path, ["開啟", "設為目前計畫", ...(completed ? [] : ["標記完成"]), "刪除"]);
+      if (action === undefined) continue;
+      requireIdle(ctx);
+      if (action === "刪除") { await discardArtifact(record, ctx); continue; }
+      if (action === "開啟") { await openArtifact(record.id, ctx); return; }
+      if (action === "設為目前計畫") {
+        if (plan!.active) throw new Error("已有進行中的計畫。先 /plan off 退出，再設定另一份計畫。");
+        if (!(await resolveDraft(ctx))) continue;
+        await start(await store!.read(record.id), ctx); return;
+      }
+      if (action === "標記完成") {
+        idle(ctx);
+        if (plan!.active && plan!.state.artifactId === record.id) await plan!.finish();
+        else await store!.setProgress(record.id, "done");
+        loadout(); status(ctx);
+      }
+    }
+  };
   const short = (revision?: string) => revision?.slice(0, 8) ?? "?";
   // Subcommands, their purpose, and why each is unavailable in the current phase (undefined = available).
   const SUBCOMMANDS: Array<{ name: string; description: string; blocked: () => string | undefined }> = [
     { name: "status", description: "顯示目前階段與用法", blocked: () => undefined },
-    { name: "show", description: "重新開啟右側計畫文件", blocked: () => plan?.active ? undefined : "沒有進行中的計畫" },
+    { name: "list", description: "從清單開啟、完成或移除 artifact", blocked: () => undefined },
+    { name: "open", description: "<artifact-path> 開啟清單中的文件，Tab 補完路徑", blocked: () => undefined },
+    { name: "toggle", description: "收起／展開右側文件，保留草稿", blocked: () => pane.document ? undefined : "沒有開啟的文件" },
+    { name: "save", description: "儲存右側草稿", blocked: () => pane.document ? undefined : "沒有開啟的文件" },
+    { name: "copy", description: "<path> 將草稿另存成新檔", blocked: () => pane.document ? undefined : "沒有開啟的文件" },
+    { name: "discard", description: "移除目前右側顯示的 artifact，保留檔案", blocked: () => pane.visible ? undefined : "右側沒有顯示文件，不會刪除" },
     { name: "review", description: "選用：由主模型呼叫 subagent 審查目前版本，不是執行授權", blocked: () => !plan?.active ? "沒有進行中的計畫" : plan.state.phase === "executing" ? "實作進行中" : plan.state.phase === "done" ? "計畫已完成" : !pi.getActiveTools().includes("subagent") ? "subagent 工具未啟用" : undefined },
     { name: "approve", description: "核准目前已儲存的版本並立即開始實作", blocked: () => !plan?.active ? "沒有進行中的計畫" : ["planning", "review"].includes(plan.state.phase) ? (pane.dirty ? "右側有未儲存編輯" : undefined) : plan.state.phase === "executing" ? "已在實作中" : "計畫已完成" },
     { name: "revise", description: "回到規劃，撤銷執行授權", blocked: () => plan?.active ? undefined : "沒有進行中的計畫" },
-    { name: "done", description: "標記實作完成，再次封鎖寫入", blocked: () => plan?.state.phase === "executing" ? undefined : plan?.state.phase === "done" ? "計畫已完成，要再實作請先 /plan revise" : "沒有正在實作的計畫" },
+    { name: "done", description: "標記目前計畫或討論文件完成", blocked: () => plan?.active || pane.document ? undefined : "沒有目前計畫或開啟的文件" },
     { name: "off", description: "退出 Plan Mode 並恢復原本工具權限", blocked: () => plan?.active ? undefined : "沒有進行中的計畫" },
-    { name: "use", description: "<artifact-id> 以既有 artifact 開始規劃", blocked: () => plan?.active ? "已有進行中的計畫" : undefined },
   ];
   const usage = () => [
     plan?.active ? `目前：PLAN ${plan.state.phase} · ${plan.state.artifactId} · rev ${short(plan.state.revision)}${plan.state.phase === "executing" ? "（已核准實作）" : "（尚未允許實作）"}` : "目前：未在 Plan Mode",
@@ -247,14 +279,20 @@ export default function (pi: ExtensionAPI): void {
   ].join("\n");
   const start = async (a: Artifact, ctx: ExtensionCommandContext) => {
     const p = ensure(ctx);
-    await p.plan.enter(a.record.id, pi.getActiveTools()); if (pending) setPending(); await open(a, ctx);
+    await p.plan.enter(a.record.id, pi.getActiveTools()); if (pending) setPending(); await open(a, ctx, true);
     loadout(); status(ctx);
     ctx.ui.notify(`已進入規劃模式 ${a.record.id}。請在接下來的對話輸入規劃指示，尚未允許實作。subagent 可直接呼叫，子代理權限未受 Plan Mode 限制。`, "info");
   };
   pi.registerCommand("plan", {
     description: "Plan Mode：/plan 進入規劃模式 · review 選用審查 · approve 核准並執行 · off 退出",
-    getArgumentCompletions: prefix => {
-      // Arguments after a subcommand are not completion candidates.
+    getArgumentCompletions: async prefix => {
+      const match = prefix.match(/^open\s+([\s\S]*)$/);
+      if (match) {
+        if (!store) return null;
+        const fragment = match[1].replace(/^\.\//, "");
+        const rows = (await store.list()).filter(a => a.status !== "abandoned" && progressOf(a) !== "done" && a.path.startsWith(fragment));
+        return rows.length ? rows.map(a => ({ value: `open ${a.path}`, label: a.path, description: progressLabel(a) })) : null;
+      }
       if (/\s/.test(prefix)) return null;
       const items = SUBCOMMANDS.filter(c => c.name.startsWith(prefix)).map(c => {
         const reason = c.blocked();
@@ -266,24 +304,37 @@ export default function (pi: ExtensionAPI): void {
       if (commandBusy) { ctx.ui.notify("另一個 artifact/plan 指令正在執行，請稍候。", "warning"); return; }
       commandBusy = true;
       try {
-        const p = ensure(ctx), raw = args.trim(), [first = "", ...rest] = raw.split(/\s+/), value = rest.join(" ");
-        const action = !raw ? (p.plan.active ? "status" : "start") : first === "on" ? "on" : first === "use" && rest.length === 1 ? "use" : !rest.length && SUBCOMMANDS.some(c => c.name === first) || raw === "execute" ? first : "invalid";
+        const p = ensure(ctx), raw = args.trim(), [first = "", ...rest] = raw.split(/\s+/), value = raw.slice(first.length).trim();
+        const action = !raw ? (p.plan.active ? "status" : "start") : first === "on" ? "on" : ["open", "copy"].includes(first) || !rest.length && SUBCOMMANDS.some(c => c.name === first) || raw === "execute" ? first : "invalid";
         if (action === "invalid") throw new Error("用 /plan 進入規劃模式，再於對話輸入指示。子指令請見 /plan status。");
-        if (action === "status") { ctx.ui.notify(usage(), "info"); return; }
-        if (action === "use" && !value) throw new Error("用法：/plan use <artifact-id>");
+        if (action === "status") {
+          if (p.plan.active) { await p.plan.sync(); loadout(); }
+          const record = p.plan.state.artifactId ? (await p.store.read(p.plan.state.artifactId)).record : await paneRecord();
+          ctx.ui.notify(`${usage()}${record ? `\n文件：${record.path} · ${progressLabel(record)}` : ""}`, "info"); return;
+        }
+        if (["open", "copy"].includes(action) && !value) throw new Error(`用法：/plan ${action} <path>`);
         if (action === "on") throw new Error("/plan on 已移除。直接用 /plan 進入規劃模式。");
         if (action === "execute") throw new Error("/plan execute 已移除。用 /plan approve 核准目前版本並立即開始實作。");
-        if (action === "show") {
-          if (!p.plan.state.artifactId) throw new Error("沒有進行中的計畫。先用 /plan 進入規劃模式。");
-          const a = await p.store.read(p.plan.state.artifactId);
-          // Explicit user intent reveals a hidden pane; background model updates still keep it hidden.
-          await pane.open(resolve(ctx.cwd, a.record.path), ctx); pane.show(ctx, false); return;
+        if (action === "list") { await listArtifacts(ctx); return; }
+        if (action === "open") { await openArtifact((await p.store.resolve(value)).record.id, ctx); return; }
+        if (action === "toggle") { pane.toggle(ctx); return; }
+        if (action === "save") { requireIdle(ctx); if (!pane.document) throw new Error("沒有開啟的文件。"); await pane.save(); return; }
+        if (action === "copy") {
+          requireIdle(ctx); if (!pane.document) throw new Error("沒有開啟的文件。");
+          const target = resolve(ctx.cwd, value); await pane.document.saveCopy(target);
+          ctx.ui.notify(`Draft copy saved: ${target}`, "info"); return;
+        }
+        if (action === "discard") {
+          if (!pane.visible) { ctx.ui.notify("右側沒有顯示 artifact，不會刪除。", "info"); return; }
+          const record = await paneRecord();
+          if (record) await discardArtifact(record, ctx);
+          return;
         }
         if (action === "off" && !p.plan.active) { ctx.ui.notify("目前不在 Plan Mode，沒有需要退出的計畫。", "info"); return; }
         idle(ctx);
-        if (action === "start" || action === "use") {
+        if (action === "start") {
           if (p.plan.active) throw new Error(`已有進行中的計畫${p.plan.state.artifactId ? ` ${p.plan.state.artifactId}` : "（狀態損毀）"}。用 /plan off 退出後再開始新計畫。`);
-          await start(action === "use" ? await p.store.resolve(value) : await p.store.create(planTemplate()), ctx);
+          await start(await p.store.create(planTemplate()), ctx);
         } else if (action === "off") {
           if (!(await ctx.ui.confirm("退出 Plan Mode？", "將移除規劃限制並恢復原本的工具權限。計畫不會被核准或執行。"))) { ctx.ui.notify("已取消，仍在 Plan Mode。", "info"); return; }
           const tools = p.plan.off(); if (tools) pi.setActiveTools(tools); status(ctx);
@@ -296,7 +347,7 @@ export default function (pi: ExtensionAPI): void {
           ctx.ui.notify(`已提交 rev ${short(revision)}，將由主模型呼叫 subagent 審查。審查不是執行授權，可繼續提問與修改；修改後會回到規劃。子代理權限未受 Plan Mode 限制。`, "info");
           pi.sendUserMessage([
             `Plan review requested: ${artifactId}, exact revision ${revision}.`,
-            `Main agent: call subagent directly now, in foreground, once for each of these five plan reviewers: ${PLAN_REVIEWERS.map(([agent, lane]) => `${agent} (${lane})`).join(", ")}. Use separate calls; they need not run concurrently. Do not open the manual /artifact line-review UI.`,
+            `Main agent: call subagent directly now, in foreground, once for each of these five plan reviewers: ${PLAN_REVIEWERS.map(([agent, lane]) => `${agent} (${lane})`).join(", ")}. Use separate calls; they need not run concurrently. Report findings in chat only; do not write line-comment review records.`,
             `Give every child the same self-contained brief: review only the immutable plan snapshot at ${JSON.stringify(snapshot)}, revision ${revision}. Cwd: ${JSON.stringify(ctx.cwd)}. The requirement baseline is the **Goal** item under the snapshot's ## 1. Goal and Boundaries, maintained by the main agent; if it is missing or empty, the reviewer must say requirement coverage was not checked. Do not ask for a fixed number of findings. Do not modify files, run shells or delegate again. These are task instructions, NOT a Plan Mode tool restriction on the child.`,
             `After all five return, read_artifact and compare its current revision to ${revision}. Report one section per lane, each labeled with revision ${revision} and one status: the reviewer's verdict (NO ISSUES, ISSUES or UNVERIFIED), FAILED if the call failed or returned no report, or STALE for every lane if the revision changed; do not treat a stale review as passing the new plan. Keep each reviewer's Issues and Needs confirmation items separate. If some reviewers fail, still report the others and list the failed lanes with the reason; do not retry automatically or fabricate a review.`,
             `Do not edit the plan in response to findings unless the user asks. A positive review never approves or starts implementation. Continue Q&A or revisions, and wait for the user's /plan approve before implementation.`,
@@ -325,8 +376,14 @@ export default function (pi: ExtensionAPI): void {
           await p.plan.revise(); if (pending) setPending(); loadout(); status(ctx);
           ctx.ui.notify("已回到規劃模式，可以繼續提問與修改計畫；尚未允許實作", "info");
         } else if (action === "done") {
-          p.plan.finish(); loadout(); status(ctx);
-          ctx.ui.notify("已標記完成，專案寫入與 shell 再次封鎖。用 /plan off 退出並恢復工具。", "info");
+          if (p.plan.active) await p.plan.finish();
+          else {
+            const record = await paneRecord();
+            if (!record) throw new Error("沒有目前計畫或開啟的文件。");
+            await p.store.setProgress(record.id, "done");
+          }
+          loadout(); status(ctx);
+          ctx.ui.notify(p.plan.active ? "已標記完成，專案寫入與 shell 再次封鎖。用 /plan off 退出並恢復工具。" : "已標記完成，從未完成清單隱藏。", "info");
         }
       } catch (error) { ctx.ui.notify(errorText(error), "error"); }
       finally { commandBusy = false; }
@@ -335,7 +392,7 @@ export default function (pi: ExtensionAPI): void {
   pi.on("input", () => { if (pending) setPending(); });
   pi.on("tool_call", async (event, ctx) => {
     const p = ensure(ctx);
-    if (pending && ctx.hasUI) return { block: true, terminate: true, reason: `Artifact ${pending} is awaiting review. End this turn. Use /artifact to review.` };
+    if (pending && ctx.hasUI) return { block: true, terminate: true, reason: `Artifact ${pending} is awaiting user feedback. End this turn. Inspect/edit the right pane or use /plan list, then continue in chat.` };
     const reason = await p.plan.block(event.toolName, event.input as Record<string, unknown>, pane.dirty);
     loadout(); status(ctx);
     if (reason) return { block: true, reason };

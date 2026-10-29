@@ -21,8 +21,8 @@ test('approve grants execution for the exact revision in one step; review is opt
   assert.equal(plan.state.phase, 'executing'); assert.equal(plan.state.approval.revision, a.revision);
   assert.equal(await plan.block('write', {}), undefined);
   await assert.rejects(plan.approve(a.revision), /已在實作/); await assert.rejects(plan.submit(), /實作進行中/);
-  plan.finish(); assert.ok(await plan.block('write', {})); await assert.rejects(plan.approve(a.revision), /計畫已完成/); await assert.rejects(plan.submit(), /計畫已完成/);
-  assert.throws(() => plan.finish(), /計畫已完成.*\/plan revise/); assert.equal(plan.state.approval, undefined);
+  await plan.finish(); assert.ok(await plan.block('write', {})); await assert.rejects(plan.approve(a.revision), /計畫已完成/); await assert.rejects(plan.submit(), /計畫已完成/);
+  await assert.rejects(plan.finish(), /計畫已完成.*\/plan revise/); assert.equal(plan.state.approval, undefined);
   for (const tool of ['subagent', 'list_subagents', 'subagent_status']) {
     assert.equal(plan.allowsPlanningTool(tool), false); assert.match(await plan.block(tool, {}), /blocks.*\/plan revise/);
   }
@@ -33,7 +33,7 @@ test('approve grants execution for the exact revision in one step; review is opt
   assert.match(await plan.block('write', {}), /unreadable/); assert.equal(plan.state.phase, 'done');
   await writeFile(join(cwd, a.record.path), saved.content); await plan.sync();
   await assert.rejects(plan.approve(plan.state.revision), /計畫已完成/);
-  await plan.revise(); await plan.approve(plan.state.revision); assert.equal(plan.state.phase, 'executing'); plan.finish();
+  await plan.revise(); await plan.approve(plan.state.revision); assert.equal(plan.state.phase, 'executing'); await plan.finish();
   assert.deepEqual(plan.off(), ['read', 'bash']); assert.equal(await plan.block('bash', {}), undefined);
   await plan.enter(a.record.id, []); await plan.submit(); await plan.approve(plan.state.revision); assert.equal(plan.state.phase, 'executing');
 }));
@@ -85,6 +85,17 @@ test('malformed latest state never revives an execution grant; unreadable plan l
   await plan.enter(a.record.id, []); await plan.approve(a.revision);
   await rm(join(cwd, a.record.path)); assert.match(await plan.block('write', {}), /unreadable/);
   assert.equal(plan.state.approval, undefined);
+}));
+test('failed completion progress stays locked and can be retried', () => fixture(async ({ store, plan, a }) => {
+  await plan.enter(a.record.id, []); await plan.approve(a.revision);
+  const setProgress = store.setProgress.bind(store);
+  store.setProgress = async () => { throw Error('index unavailable'); };
+  await assert.rejects(plan.finish(), /index unavailable/);
+  assert.equal(plan.state.phase, 'planning'); assert.equal(plan.state.approval, undefined);
+  assert.ok(await plan.block('write', {}));
+  store.setProgress = setProgress;
+  await plan.finish();
+  assert.equal(plan.state.phase, 'done'); assert.equal((await store.read(a.record.id)).record.progress, 'done');
 }));
 test('persist failure cannot unlock execution', () => fixture(async ({ store, a }) => {
   let fail = false;

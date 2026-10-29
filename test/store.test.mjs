@@ -61,6 +61,28 @@ test('concurrent index updates are serialized and failed edits do not corrupt in
   await store.abandon(values[0].record.id);
   await assert.rejects(store.update(values[0].record.id, x => x), /abandoned/);
 }));
+test('discussion progress is independent of legacy approval and completed artifacts stay done after edits', () => fixture(async (store, cwd) => {
+  const a = await store.create('# Discuss');
+  assert.equal(a.record.progress, 'discussing');
+  await store.review(a.record.id, a.revision, 'approved');
+  assert.equal((await store.list())[0].progress, 'discussing', 'legacy approval is not completion');
+  await store.setProgress(a.record.id, 'reviewing', a.revision);
+  const b = await store.update(a.record.id, c => c + '\nchanged');
+  assert.equal(b.record.progress, 'discussing');
+  await assert.rejects(store.setProgress(a.record.id, 'implementing', a.revision), /Stale/);
+  await store.setProgress(a.record.id, 'done');
+  const c = await store.update(a.record.id, c => c + '\nafter completion');
+  assert.equal(c.record.progress, 'done');
+  await writeFile(join(cwd, a.record.path), c.content + '\non disk');
+  assert.equal((await store.read(a.record.id)).record.progress, 'done');
+  const reloaded = new ArtifactStore(cwd);
+  assert.equal((await reloaded.list())[0].progress, 'done');
+  await reloaded.abandon(a.record.id);
+  await assert.rejects(reloaded.resolve(a.record.path), /No artifact found/);
+  await assert.rejects(reloaded.filePath(a.record.id), /removed/);
+  await assert.rejects(reloaded.setProgress(a.record.id, 'discussing'), /abandoned/);
+  assert.equal(await reloaded.revision(a.record.id, a.revision), a.content);
+}));
 test('invalid index, traversal, binary and revision corruption fail closed', () => fixture(async (store, cwd) => {
   const a = await store.create('safe');
   await assert.rejects(store.create('\0'), /text/);

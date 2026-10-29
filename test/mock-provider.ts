@@ -47,12 +47,13 @@ export default function (pi: ExtensionAPI) {
           const review = userTexts.findLast(text => text.startsWith("Plan review requested: "));
           await log({ providerCall: calls, step, execute, reviewStep });
           const index = JSON.parse(await readFile(join(".pi/artifacts/index.json"), "utf8"));
+          const artifact = index.artifacts.findLast((a: any) => a.status !== "abandoned");
           let tool: { name: string; arguments: unknown } | undefined;
           if (execute && step < 10) { step = 10; tool = { name: "write", arguments: { path: "approved.txt", content: "approved implementation\n" } }; }
           else if (review && reviewStep === 0) { reviewStep++; tool = { name: "subagent", arguments: { agent: "logic-reviewer", task: review } }; }
-          else if (review && reviewStep === 1) { reviewStep++; tool = { name: "read_artifact", arguments: { artifactId: index.artifacts[0].id } }; }
+          else if (review && reviewStep === 1) { reviewStep++; tool = { name: "read_artifact", arguments: { artifactId: artifact.id } }; }
           else if (!execute && step === 0) { step++; tool = { name: "web_search", arguments: {} }; }
-          else if (!execute && step === 1) { step++; tool = { name: "edit_artifact", arguments: { artifactId: index.artifacts[0].id, edits: [{ oldText: "## 4. Work Units", newText: "## 4. Work Units\nImplement one verified change." }] } }; }
+          else if (!execute && step === 1) { step++; tool = { name: "edit_artifact", arguments: { artifactId: artifact.id, edits: [{ oldText: "## 4. Work Units", newText: "## 4. Work Units\nImplement one verified change." }] } }; }
           else if (!execute && step === 2) { step++; tool = { name: "request_plan_review", arguments: {} }; }
           stream.push({ type: "start", partial: message });
           if (tool) {

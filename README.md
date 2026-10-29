@@ -39,17 +39,23 @@ Other commands:
 
 | Command | Effect |
 | --- | --- |
-| `/plan use <id>` | Start Plan Mode with an existing artifact. |
+| `/plan list` | List unfinished artifacts in a UI. Select Open, Set as current plan, Mark complete, or Delete. Switch to completed artifacts from the same UI. |
 | `/plan` | Enter Plan Mode without triggering the model. If a plan is already active, show its status without replacing it. |
 | `/plan status` | Show phase, identity, revision, usage and unavailable reasons without creating a plan. |
-| `/plan show` | Open the active plan. |
+| `/plan open <artifact-path>` | Open an indexed, non-removed artifact without entering Plan Mode. Tab completes unfinished artifact paths only, not arbitrary Markdown files. Reopening reveals a hidden pane. |
+| `/plan toggle` | Hide or reveal the document, retaining the draft. Also available as F7. |
+| `/plan save` | Save the document with conflict checks. Also available as `:w`. |
+| `/plan copy <path>` | Write the draft to a new file without overwriting. This does not register a new artifact. |
+| `/plan discard` | Confirm removal of the artifact currently visible in the right pane. If the pane is hidden, detached, or empty, do nothing. Retain files and revision history. |
 | `/plan revise` | Return to planning and revoke approval. |
-| `/plan done` | End implementation and block main-agent writes, shell and new subagent calls again. Edits do not reopen a finished plan; use `/plan revise`. |
+| `/plan done` | Mark the current plan complete, or the open discussion artifact when outside Plan Mode. Hide it from the unfinished list. An active plan blocks main-agent writes, shell and new subagent calls again. Edits do not reopen a finished plan; use `/plan revise`. |
 | `/plan off` | Explicitly leave Plan Mode and remove its restrictions, without granting approval. |
 
-An active plan must be turned off before switching to another one. State changes require an idle agent and no unsaved document or document I/O. Approval requires an interactive confirmation dialog.
+Select **Set as current plan** in `/plan list` to start planning with an existing artifact, including a completed one. Only one plan can be active in a session; exit with `/plan off` before selecting another. Merely opening a discussion document does not enter Plan Mode or change its progress. State changes require an idle agent and no unsaved document or document I/O. Approval requires an interactive confirmation dialog.
 
-Type `/plan ` for subcommands and descriptions, filtered by prefix, with unavailable reasons for the current phase. Planning instructions belong in subsequent chat messages, not in `/plan` arguments. `use <id>` selects an existing artifact without triggering the model, and the removed `on` prefix reports an error. Phases are `planning`, `review`, `executing` and `done`, shown in the pane's bottom-right corner, not the global footer.
+Type `/plan ` for subcommands and descriptions, filtered by prefix, with unavailable reasons for the current phase. `/plan open ` also completes indexed paths with Tab. Planning instructions belong in subsequent chat messages, not in `/plan` arguments. Phases are `planning`, `review`, `executing` and `done`, shown in the pane's bottom-right corner, not the global footer.
+
+`/artifact`, `/plan-pane`, `/plan use`, `/plan show` and `/plan close` are not registered commands. Use the list UI to select files and F7 or `/plan toggle` to collapse the pane. Removing a visible or selected artifact uses the same confirmation. Removing an active plan explicitly warns that Plan Mode will exit and the original tool permissions will be restored. If its pane contains an unsaved draft, the confirmation also warns that the draft will be lost.
 
 ### Tool policy and limits
 
@@ -73,16 +79,9 @@ The model-facing tools are:
 | `replace_artifact({artifactId, content, expectedRevision})` | Replace content only if the expected revision still matches. |
 | `request_plan_review({})` | Submit the active plan and stop the turn. |
 
-Historical `create_artifact` and `edit_artifact` argument shapes and result details are retained. Generic artifact creation stops for user review in interactive sessions. It does not enter or approve Plan Mode automatically.
+Historical `create_artifact` and `edit_artifact` argument shapes and result details are retained. Generic artifact creation stops for user feedback in interactive sessions. Inspect/edit the right pane and continue in chat, or reopen through `/plan list`. It does not enter or approve Plan Mode automatically.
 
-```text
-/artifact
-/artifact <id-or-path>
-/artifact review <id-or-path>
-/artifact abandon <id-or-path>
-```
-
-The selector includes previously approved artifacts. This legacy line-comment review is separate from `/plan review`, does not change Plan Mode phase or authorization, and retains existing comment data. Review supports `j/k`, arrows, `g/G`, `c` to add/edit a line comment, `d` to delete it, `a` then `y` to approve the document, `r` to submit a rejection reason, and `q` or Esc to cancel. Review results sent to the model explicitly state `executionApproved: false`.
+There is no manual line-comment review UI. Edit the document directly, save, and request another agent review. `/plan review` reports findings in chat and does not write line-comment review files. Existing review records are left on disk.
 
 Project-local persistence:
 
@@ -96,21 +95,19 @@ Project-local persistence:
 
 New artifacts store exactly the supplied Markdown content without automatically adding frontmatter. IDs, creation timestamps and paths remain in the index. Existing documents are not rewritten to remove frontmatter.
 
-IDs remain stable while content revisions change. Legacy indexes and nested content layouts are read additively without deleting or moving files. Existing content receives revision snapshots when read. Old unversioned approval is never trusted for execution. Comments are restored automatically only for their exact revision, so legacy unversioned comments remain on disk but are not silently applied to potentially changed lines.
+IDs remain stable while content revisions change. Legacy indexes and nested content layouts are read additively without deleting or moving files. Existing content receives revision snapshots when read. Old unversioned approval is never trusted for execution.
+
+`index.json` also persists document `progress`: `discussing` on creation, plan entry or revise, `reviewing` on submission or `/plan review`, `implementing` on `/plan approve`, and `done` on completion. Legacy approval alone never means complete. Older records default to discussing, except `in_review` defaults to reviewing. Saved content changes reset unfinished documents to discussing; completed documents stay complete until explicitly reopened for planning. Opening, hiding and `/plan off` do not change progress. Removal reuses `status: abandoned`, excludes the document from lists and completions, and keeps content, immutable revisions and any old review files. These document fields never grant execution permission.
 
 Plan state is stored as pi session custom entries and reconstructed from the active branch. Switching branches does not overwrite the working document with an older snapshot. Reloading or restoring an executing state, including legacy persisted `approved`, returns it to review with no execution grant. A fresh `/plan approve` confirmation is required. Corrupt state or unreadable content fails closed. `read_artifact` includes the revision in model-visible text and can read immutable historical snapshots; this package does not restore arbitrary project files.
 
 ## Split editor
 
-Open an existing Markdown file independently of Plan Mode:
+Open an artifact independently of Plan Mode with `/plan list`, or type `/plan open ` and use Tab to choose an indexed path. Arbitrary Markdown files are rejected, including files created with `/plan copy`. Completed artifacts can be found through the list's completed view.
 
-```text
-/plan-pane open docs/plan.md
-```
+Paths are relative to pi's working directory. Spaces need no surrounding quotes. The canonical target must be an existing `.md` regular file of at most 1 MiB within the artifact store. Symlinks are resolved when opening.
 
-Paths are relative to pi's working directory. Spaces need no surrounding quotes. The canonical target must be an existing `.md` regular file of at most 1 MiB. Symlinks are resolved when opening.
-
-The document opens with chat still active. **F6** switches keyboard input between chat and the document. Clicking either editor also changes its input target. **F7** or `/plan-pane toggle` hides or reshows the pane. Hidden chat uses full width; reshow restores equal columns. The document, unsaved text and cursor position are retained without saving. Pane-local scroll, search history and pending commands reset on reshow. Hiding neither exits Plan Mode nor grants execution. F7 is global and reports an error when no document is open.
+The document opens with chat still active. **F6** switches keyboard input between chat and the document. Clicking either editor also changes its input target. **F7** or `/plan toggle` hides or reshows the pane. Hidden chat uses full width; reshow restores equal columns. The document, unsaved text and cursor position are retained without saving. Pane-local scroll, search history and pending commands reset on reshow. Hiding neither exits Plan Mode nor grants execution. F7 is global and reports an error when no document is open.
 
 The right pane shows Markdown source, not a rendered preview. Its mode and cursor position stay visible; `[+]` marks unsaved text. The bottom border shows F6/F7 hints on the left and the Plan phase on the right. Narrow panes drop the hints before the phase.
 
@@ -144,18 +141,11 @@ This is a small Vim-inspired editor, not embedded Neovim. Only `:w` and `:wq` ar
 
 ### Conflicts and recovery
 
-```text
-/plan-pane show
-/plan-pane toggle
-/plan-pane save
-/plan-pane copy docs/plan-conflict-copy.md
-/plan-pane close
-/plan-pane discard
-```
+`/plan toggle` hides or reshows the retained document without saving or closing it. `/plan save` and `:w` check the exact disk baseline and refuse to overwrite an external change. `:wq` leaves the pane open with the draft intact on conflict or failure. Saves serialize through pi's `withFileMutationQueue`, use an adjacent temporary file and rename, and preserve file mode and CRLF line endings. These checks are not cross-process atomic compare-and-swap.
 
-`show` reattaches a retained document and focuses an attached pane. `toggle` hides or reshows it without saving or closing the document. `save` and `:w` check the exact disk baseline and refuse to overwrite an external change. `:wq` leaves the pane open with the draft intact on conflict or failure. Saves serialize through pi's `withFileMutationQueue`, use an adjacent temporary file and rename, and preserve file mode and CRLF line endings. These checks are not cross-process atomic compare-and-swap.
+`/plan copy <path>` writes the draft to a new path and never overwrites an existing file or clears the original dirty state. When opening a document with unsaved edits, a UI offers Save, Discard edits, or Cancel. This applies to reopening the same artifact too. Choosing Discard edits drops only the draft, not the artifact. `/plan discard` is different: it removes the visible artifact from the list after confirmation.
 
-`copy` writes the draft to a new path and never overwrites an existing file or clears the original dirty state. `close` refuses to abandon unsaved work. `discard` explicitly drops the draft. A clean document follows disk changes every 500 ms. A dirty draft remains in memory with a conflict indicator. Resolve conflicts by saving a copy, discarding the original buffer, and reopening the intended document. There is no force-overwrite command.
+A clean document follows disk changes every 500 ms. A dirty draft remains in memory with a conflict indicator. Resolve conflicts by saving a copy, then reopening the artifact and choosing Discard edits. There is no force-overwrite command.
 
 Outside Plan Mode, normal file tools are not intercepted to protect editor drafts. Inside Plan Mode, artifact changes also check for a dirty pane. Session switches, forks, and tree navigation are refused while a draft is dirty or document I/O is active.
 
@@ -165,7 +155,7 @@ A graceful `/reload` or shutdown writes unsaved text to a private recovery file:
 <pi-agent-dir>/drafts/pi-artifact/<timestamp>-<uuid>-<original-name>.md
 ```
 
-The default agent directory is `~/.pi/agent`. Directories use mode `0700` and recovery files `0600`. The path is reported in pi. Recoveries are not automatically reopened. Use `/plan-pane open <path>` to inspect one. Crashes, SIGKILL, and power loss are not protected by this shutdown-only recovery.
+The default agent directory is `~/.pi/agent`. Directories use mode `0700` and recovery files `0600`. The path is reported in pi. Recoveries are not automatically reopened or registered as artifacts. Inspect them in an external editor and copy the desired content back to the artifact. Crashes, SIGKILL, and power loss are not protected by this shutdown-only recovery.
 
 ## Compatibility
 
@@ -188,8 +178,8 @@ npm run test:pty
 
 No `npm install` is needed for the local tests. They resolve host dependencies from installed pi. Set `PI_PACKAGE_ROOT` if pi is installed outside the managed release location or active Node global prefix.
 
-The unit/integration suite covers storage, revision approval, fail-closed policy, active-branch restore, review UI, editor behavior, real pi layout rendering, and its stable renderer proxy.
+The unit/integration suite covers storage, revision approval, fail-closed policy, active-branch restore, artifact lists and completions, document progress, safe removal, editor behavior, real pi layout rendering, and its stable renderer proxy.
 
-The PTY test starts real pi with an isolated agent directory, offline mode, no discovered extensions or MCP, and no copied credentials. A test-only in-process provider makes scripted model/tool calls without a network transport. It exercises CJK paste/save, Ctrl+C, F7, `:wq`, search and word motions, focus and resize, one-plan model updates, main-session nested and shell blocking, subagent review dispatch, persisted legacy line comments, one approve-and-execute dialog, an authorized write, content-change revocation, and clean exit. The subagent is a dispatch stub, not a real child-process or read-only enforcement test. Exact half-width geometry is asserted by the layout integration test.
+The PTY test starts real pi with an isolated agent directory, offline mode, no discovered extensions or MCP, and no copied credentials. A test-only in-process provider makes scripted model/tool calls without a network transport. It exercises CJK paste/save, Ctrl+C, F7, `:wq`, search and word motions, focus and resize, one-plan model updates, main-session nested and shell blocking, subagent review dispatch without line-comment records, artifact-only Tab completion, list selection, hidden-pane removal protection, persisted progress, one approve-and-execute dialog, an authorized write, content-change revocation, and clean exit. The subagent is a dispatch stub, not a real child-process or read-only enforcement test. Exact half-width geometry is asserted by the layout integration test.
 
 Automated tests check CJK graphemes and the IME cursor marker. **Visual acceptance of an actual Chinese input-method candidate window still requires an interactive terminal check.**

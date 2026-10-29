@@ -51,13 +51,21 @@ export class PlanController {
   async enter(id: string, tools: string[]) {
     const a = await this.store.read(id);
     if (a.record.status === "abandoned") throw new Error("Cannot plan an abandoned artifact.");
+    await this.store.setProgress(id, "discussing", a.revision);
     this.set({ v: 1, phase: "planning", artifactId: id, revision: a.revision, previousTools: this.active ? this.state.previousTools : [...tools] });
   }
   async sync(): Promise<boolean> {
     if (!this.active) return false;
     if (this.corrupt) throw new Error("Corrupt persisted Plan Mode state. Use /plan off, then /plan to recover explicitly.");
     let revision: string;
-    try { revision = (await this.store.read(this.state.artifactId!)).revision; }
+    try {
+      const a = await this.store.read(this.state.artifactId!);
+      if (a.record.status === "abandoned") throw new Error("Artifact is abandoned. Use /plan off to exit.");
+      // Another session may finish the shared document, but can never grant execution here.
+      if (a.record.progress === "done" && this.state.phase !== "done") this.set({ ...this.state, phase: "done", approval: undefined });
+      else if (this.state.phase === "executing" && a.record.progress !== "implementing") this.set({ ...this.state, phase: "planning", approval: undefined });
+      revision = a.revision;
+    }
     catch (error) {
       const phase = this.state.phase === "done" ? "done" : "planning";
       if (this.state.phase !== phase || this.state.approval) this.set({ ...this.state, phase, approval: undefined });
@@ -73,6 +81,7 @@ export class PlanController {
     await this.sync();
     if (this.state.phase === "executing") throw new Error("實作進行中。要修改計畫請先 /plan revise。");
     if (this.state.phase === "done") throw new Error("計畫已完成。要再修改請先 /plan revise，或 /plan off 退出。");
+    await this.store.setProgress(this.state.artifactId!, "reviewing", this.state.revision);
     this.set({ ...this.state, phase: "review", approval: undefined });
   }
   /** Approves the exact saved revision and starts execution in one persisted step. Review is optional. */
@@ -80,14 +89,23 @@ export class PlanController {
     await this.sync();
     if (!["planning", "review"].includes(this.state.phase)) throw new Error(this.state.phase === "executing" ? "這個版本已在實作中。" : this.state.phase === "done" ? "計畫已完成。要再實作請先 /plan revise。" : "沒有可核准的計畫。先用 /plan 進入規劃模式。");
     if (this.state.revision !== expectedRevision) throw new Error("計畫在確認期間已變更，未放行實作。請檢視新版本後再 /plan approve。");
+    await this.store.setProgress(this.state.artifactId!, "implementing", expectedRevision);
     this.set({ ...this.state, phase: "executing", approval: { revision: expectedRevision, approvedAt: new Date().toISOString() } });
   }
   async revise() {
     if (!this.active) throw new Error("沒有進行中的計畫。先用 /plan 進入規劃模式。");
-    await this.sync(); this.set({ ...this.state, phase: "planning", approval: undefined });
+    await this.sync();
+    // Revoke permission before any disk operation that might fail.
+    this.set({ ...this.state, phase: "planning", approval: undefined });
+    await this.store.setProgress(this.state.artifactId!, "discussing", this.state.revision);
   }
-  finish() {
-    if (this.state.phase !== "executing") throw new Error(this.state.phase === "done" ? "計畫已完成，要再實作請先 /plan revise。" : "沒有正在實作的計畫，無法標記完成。先用 /plan approve 核准並開始實作。");
+  async finish() {
+    if (!this.active) throw new Error("沒有進行中的計畫，無法標記完成。");
+    await this.sync();
+    if (this.state.phase === "done") throw new Error("計畫已完成，要再實作請先 /plan revise。");
+    // Lock execution first, but only report completion after durable progress succeeds.
+    this.set({ ...this.state, phase: "planning", approval: undefined });
+    await this.store.setProgress(this.state.artifactId!, "done", this.state.revision);
     this.set({ ...this.state, phase: "done", approval: undefined });
   }
   off() { const tools = this.state.previousTools; this.set({ v: 1, phase: "off" }); return tools; }
@@ -96,6 +114,7 @@ export class PlanController {
     try { await this.sync(); } catch (error) { return `Plan unreadable. Execution locked: ${String(error)}`; }
     if (dirty && this.state.phase === "executing") {
       this.set({ ...this.state, phase: "planning", approval: undefined });
+      await this.store.setProgress(this.state.artifactId!, "discussing", this.state.revision);
     }
     if (!this.restricted) return;
     if (PLAN_DELEGATION_TOOLS.has(tool) && !["planning", "review"].includes(this.state.phase)) return `Plan Mode (${this.state.phase}) blocks ${tool}. Use /plan revise to reopen planning, or /plan off to exit.`;

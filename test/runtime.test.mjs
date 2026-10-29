@@ -3,14 +3,14 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { load } from './host.mjs';
+import { load, tui } from './host.mjs';
 const theme = { fg: (_token, value) => value };
 const extension = (await load('extension')).default;
 const { ArtifactStore } = await load('store');
 async function fixture(fn) {
   const cwd = await mkdtemp(join(tmpdir(), 'pi-plan-runtime-'));
   const tools = new Map(), commands = new Map(), events = new Map(), entries = [], notices = [], messages = [], statuses = new Map();
-  const reviewScripts = [], reviewFrames = [], confirms = [], shortcuts = new Map();
+  const reviewScripts = [], reviewFrames = [], confirms = [], shortcuts = new Map(), selections = [], selectScripts = [];
   let active = ['read', 'bash', 'write', 'codemode', 'subagent'], idle = true, confirmation = true;
   const pi = {
     registerTool: tool => { assert.ok(!tools.has(tool.name), `Duplicate tool: ${tool.name}`); tools.set(tool.name, tool); },
@@ -25,7 +25,11 @@ async function fixture(fn) {
     sessionManager: { getBranch: () => entries.slice() },
     ui: { notify: (text, type) => notices.push({ text, type }), setStatus: (k, v) => v === undefined ? statuses.delete(k) : statuses.set(k, v),
       getEditorComponent: () => undefined, setEditorComponent: () => { throw Error('no viewport'); },
-      confirm: async (...args) => { confirms.push(args); return typeof confirmation === 'function' ? confirmation(...args) : confirmation; }, select: async () => undefined,
+      confirm: async (...args) => { confirms.push(args); return typeof confirmation === 'function' ? confirmation(...args) : confirmation; }, select: async (title, options) => {
+        selections.push({ title, options });
+        const choice = selectScripts.shift();
+        return typeof choice === "function" ? choice(options) : choice;
+      },
       custom: async factory => {
         let result;
         const component = factory({ terminal: { rows: 30 }, requestRender() {} }, theme, {}, value => { result = value; });
@@ -48,20 +52,22 @@ async function fixture(fn) {
     return tools.get(name)?.execute('call', input, new AbortController().signal, undefined, ctx);
   };
   try { await emit('session_start'); await fn({ cwd, ctx, tools, commands, emit, entries, messages, notices, statuses, command, tool,
-    reviewScripts, reviewFrames, confirms, shortcuts, store: new ArtifactStore(cwd), active: () => active, setIdle: value => { idle = value; }, setConfirm: value => { confirmation = value; } }); }
+    reviewScripts, reviewFrames, confirms, shortcuts, selections, selectScripts, store: new ArtifactStore(cwd), active: () => active, setIdle: value => { idle = value; }, setConfirm: value => { confirmation = value; } }); }
   finally { await emit('session_shutdown', { reason: 'quit' }); await rm(cwd, { recursive: true, force: true }); }
 }
 const last = f => f.notices.at(-1).text;
 test('registers each artifact tool, command and shortcut exactly once', () => fixture(async f => {
   assert.deepEqual([...f.tools.keys()].sort(), ['create_artifact', 'edit_artifact', 'read_artifact', 'replace_artifact', 'request_plan_review']);
-  assert.deepEqual([...f.commands.keys()].sort(), ['artifact', 'plan', 'plan-pane']);
+  assert.deepEqual([...f.commands.keys()].sort(), ['plan']);
   assert.deepEqual([...f.shortcuts.keys()], ['f7']);
 }));
-test('/plan review requests revision-bound subagent review in chat; legacy line comments remain compatible', () => fixture(async f => {
+test('/plan review requests revision-bound subagent review in chat without writing legacy reviews', () => fixture(async f => {
   const a = await f.store.create('# Context\n\nsecond line', 'Review');
   const line = a.content.split('\n').indexOf('# Context') + 2;
   await f.store.review(a.record.id, a.revision, 'rejected', '', [{ line, comment: 'keep this comment' }]);
-  await f.command(`use ${a.record.id}`); assert.equal(f.messages.length, 0); f.ctx.mode = 'tui';
+  f.ctx.mode = 'tui';
+  f.selectScripts.push(options => options.find(o => o.includes(a.record.path)), '設為目前計畫');
+  await f.command('list'); assert.equal(f.messages.length, 0);
   await f.command('review');
   assert.equal(f.reviewFrames.length, 0, 'no manual line-review UI'); assert.match(last(f), /已提交 rev .*subagent 審查。審查不是執行授權/);
   const request = f.messages.at(-1);
@@ -72,8 +78,8 @@ test('/plan review requests revision-bound subagent review in chat; legacy line 
   assert.match(request, /requirement baseline is the \*\*Goal\*\* item under the snapshot's ## 1\. Goal and Boundaries/); assert.match(request, /do not retry automatically or fabricate a review/);
   assert.equal(await f.emit('tool_call', { toolName: 'subagent', input: { agent: 'logic-reviewer', task: request } }), undefined);
   assert.equal((await f.tool('write')).block, true);
-  f.reviewScripts.push(['a', 'y']); await f.commands.get('artifact').handler(`review ${a.record.id}`, f.ctx);
-  assert.equal(f.reviewFrames.length, 1); assert.match(last(f), /does not change Plan Mode or authorize/);
+  assert.equal(f.reviewFrames.length, 0);
+  assert.equal((await f.store.read(a.record.id)).record.progress, 'reviewing');
   assert.equal((await f.store.readReview(a.record.id, a.revision)).lineComments[0].comment, 'keep this comment');
   assert.equal((await f.tool('write')).block, true);
 }));
@@ -176,8 +182,8 @@ test('revise and done give explicit feedback without granting execution', () => 
   await f.command(''); f.ctx.mode = 'tui'; await f.command('approve');
   await f.command('revise'); assert.equal(last(f), '已回到規劃模式，可以繼續提問與修改計畫；尚未允許實作');
   assert.equal((await f.tool('write')).block, true);
-  await f.command('done'); assert.match(last(f), /沒有正在實作的計畫/);
-  await f.command('approve'); await f.command('done'); assert.match(last(f), /已標記完成/); assert.equal((await f.tool('write')).block, true);
+  await f.command('done'); assert.equal((await f.store.list())[0].progress, 'done');
+  await f.command('revise'); await f.command('approve'); await f.command('done'); assert.match(last(f), /已標記完成/); assert.equal((await f.tool('write')).block, true);
   const donePlan = await f.store.read((await f.store.list())[0].id);
   await assert.rejects(f.tool('create_artifact', { content: '# Must not replace a finished plan' }), /計畫已完成.*\/plan revise/);
   assert.deepEqual(await f.store.read(donePlan.record.id), donePlan, 'done create rejection must not write content or revision');
@@ -189,9 +195,11 @@ test('revise and done give explicit feedback without granting execution', () => 
   await assert.rejects(f.tool('create_artifact', { content: '# hijack' }), /實作進行中/);
   assert.match((await f.store.read((await f.store.list())[0].id)).content, /Goal/);
 }));
-test('corrupt plan state: off reports tools were not restored; use names the corrupt state', () => fixture(async f => {
+test('corrupt plan state: off reports tools were not restored; list cannot replace the corrupt state', () => fixture(async f => {
   f.entries.push({ type: 'custom', customType: 'pi-artifact:plan:v1', data: 'bad' }); await f.emit('session_start');
-  await f.command('use art_existing'); assert.match(last(f), /狀態損毀.*\/plan off/);
+  const a = await f.store.create('# Existing'); f.ctx.mode = 'tui';
+  f.selectScripts.push(options => options.find(o => o.includes(a.record.path)), '設為目前計畫');
+  await f.command('list'); assert.match(last(f), /已有進行中的計畫.*\/plan off/);
   await f.command('off'); assert.match(last(f), /工具未還原.*\/reload/); assert.equal(f.notices.at(-1).type, 'warning');
 }));
 test('bare /plan enters without a model turn; repeated entry preserves the plan; completions are phase-aware', () => fixture(async f => {
@@ -199,12 +207,12 @@ test('bare /plan enters without a model turn; repeated entry preserves the plan;
   assert.match(f.commands.get('plan').description, /\/plan 進入規劃模式.*approve 核准並執行/);
   await f.command('status'); assert.match(last(f), /未在 Plan Mode[\s\S]*approve.*不可用：沒有進行中的計畫/);
   assert.equal((await f.store.list()).length, 0, 'status creates nothing');
-  const names = complete('').map(i => i.value);
-  assert.deepEqual(names, ['status', 'show', 'review', 'approve', 'revise', 'done', 'off', 'use']);
+  const names = (await complete('')).map(i => i.value);
+  assert.deepEqual(names, ['status', 'list', 'open', 'toggle', 'save', 'copy', 'discard', 'review', 'approve', 'revise', 'done', 'off']);
   assert.ok(!names.includes('execute') && !names.includes('on'));
-  assert.deepEqual(complete('re').map(i => i.value), ['review', 'revise']);
-  assert.match(complete('ap')[0].description, /目前不可用：沒有進行中的計畫/);
-  assert.equal(complete('fix the'), null); assert.equal(complete('zzz'), null);
+  assert.deepEqual((await complete('re')).map(i => i.value), ['review', 'revise']);
+  assert.match((await complete('ap'))[0].description, /目前不可用：沒有進行中的計畫/);
+  assert.equal(await complete('fix the'), null); assert.equal(await complete('zzz'), null);
   await f.command('review the auth module'); assert.match(last(f), /用 \/plan 進入規劃模式/);
   assert.equal((await f.store.list()).length, 0, 'inline prompts do not create plans');
   await f.command('');
@@ -214,14 +222,66 @@ test('bare /plan enters without a model turn; repeated entry preserves the plan;
   assert.equal(f.messages.length, 0, 'entry does not trigger the model');
   assert.ok(!f.active().includes('bash')); assert.ok(!f.active().includes('write'));
   assert.equal((await f.tool('write')).block, true);
-  assert.doesNotMatch(complete('ap')[0].description, /不可用/);
-  assert.match(complete('done')[0].description, /不可用：沒有正在實作/);
+  assert.doesNotMatch((await complete('ap'))[0].description, /不可用/);
+  assert.doesNotMatch((await complete('done'))[0].description, /不可用/);
   await f.command(''); assert.match(last(f), /PLAN planning/);
   assert.equal((await f.store.list()).length, 1);
   assert.deepEqual(await f.store.read(a.id), saved, 'repeated entry preserves content and revision');
   assert.equal(f.messages.length, 0);
-  await f.command('use ' + a.id); assert.match(last(f), /已有進行中的計畫.*\/plan off/);
-  await f.command('use'); assert.match(last(f), /用法：\/plan use/);
+  await f.command('use ' + a.id); assert.match(last(f), /子指令請見/);
+  for (const command of ['show', 'close', 'discard extra']) { await f.command(command); assert.match(last(f), /子指令請見/); }
+  await f.command('open'); assert.match(last(f), /用法：\/plan open/);
+}));
+test('list defaults to undone artifacts, toggles completed, marks discussions done and soft-removes by UI', () => fixture(async f => {
+  const a = await f.store.create('# Discussion'), b = await f.store.create('# Complete'), c = await f.store.create('# Removed');
+  await f.store.setProgress(b.record.id, 'done'); await f.store.abandon(c.record.id);
+  f.ctx.mode = 'tui';
+  f.selectScripts.push(undefined); await f.command('list');
+  assert.ok(f.selections.at(-1).options.some(o => o.includes(a.record.path)));
+  assert.ok(!f.selections.at(-1).options.some(o => o.includes(b.record.path) || o.includes(c.record.path)));
+  f.selectScripts.push('顯示已完成', undefined); await f.command('list');
+  assert.ok(f.selections.at(-1).options.some(o => o.includes(b.record.path)));
+  f.selectScripts.push(options => options.find(o => o.includes(a.record.path)), '標記完成', undefined);
+  await f.command('list'); assert.equal((await f.store.read(a.record.id)).record.progress, 'done');
+  assert.deepEqual(f.active(), ['read', 'bash', 'write', 'codemode', 'subagent']);
+  f.selectScripts.push('顯示已完成', options => options.find(o => o.includes(b.record.path)), '刪除', undefined);
+  await f.command('list'); assert.equal((await f.store.read(b.record.id)).record.status, 'abandoned');
+  assert.equal(await readFile(join(f.cwd, b.record.path), 'utf8'), b.content);
+  assert.equal(await f.store.revision(b.record.id, b.revision), b.content);
+  assert.equal(f.messages.length, 0);
+}));
+test('open completions use only undone indexed paths and replace the entire command arguments', () => fixture(async f => {
+  const a = await f.store.create('# A'), b = await f.store.create('# B'), c = await f.store.create('# C');
+  await f.store.setProgress(b.record.id, 'done'); await f.store.abandon(c.record.id);
+  await writeFile(join(f.cwd, 'ordinary.md'), '# Not registered');
+  const spec = f.commands.get('plan');
+  const items = await spec.getArgumentCompletions('open ');
+  assert.deepEqual(items.map(o => o.value), [`open ${a.record.path}`]);
+  const provider = new tui.CombinedAutocompleteProvider([{ name: 'plan', ...spec }], f.cwd);
+  const line = '/plan open .pi/artifacts/';
+  const suggestions = await provider.getSuggestions([line], 0, line.length, { force: false });
+  assert.equal(suggestions.items.length, 1);
+  const applied = provider.applyCompletion([line], 0, line.length, suggestions.items[0], suggestions.prefix);
+  assert.deepEqual(applied.lines, [`/plan open ${a.record.path}`]);
+  assert.equal(await spec.getArgumentCompletions('open ordinary'), null);
+  assert.deepEqual((await spec.getArgumentCompletions('open ./' + a.record.path)).map(o => o.value), items.map(o => o.value));
+  f.ctx.mode = 'tui';
+  await f.command('open ordinary.md'); assert.match(last(f), /No artifact found/);
+  await f.command(`open ${c.record.path}`); assert.match(last(f), /No artifact found/);
+  await f.command('discard'); assert.match(last(f), /不會刪除/); assert.equal(f.confirms.length, 0);
+}));
+test('progress survives restores and off without restoring execution permission', () => fixture(async f => {
+  await f.command(''); const [a] = await f.store.list();
+  await f.command('review'); assert.equal((await f.store.read(a.id)).record.progress, 'reviewing');
+  f.ctx.mode = 'tui'; await f.command('approve');
+  assert.equal((await f.store.read(a.id)).record.progress, 'implementing');
+  await f.emit('session_start'); assert.equal((await f.tool('write')).block, true);
+  assert.equal((await f.store.read(a.id)).record.progress, 'implementing');
+  await f.command('off'); assert.equal((await f.store.read(a.id)).record.progress, 'implementing');
+  f.selectScripts.push(options => options.find(o => o.includes(a.path)), '設為目前計畫'); await f.command('list');
+  assert.equal((await f.store.read(a.id)).record.progress, 'discussing');
+  await f.command('done'); assert.equal((await f.store.read(a.id)).record.progress, 'done');
+  await f.command('revise'); assert.equal((await f.store.read(a.id)).record.progress, 'discussing');
 }));
 test('busy agent and noninteractive execution are refused; create stop guard survives restore', () => fixture(async f => {
   f.setIdle(false); await f.command(''); assert.match(last(f), /模型仍在回應/);
@@ -231,6 +291,6 @@ test('busy agent and noninteractive execution are refused; create stop guard sur
   await f.emit('session_start'); assert.equal((await f.tool('read')).block, true);
   await f.emit('input', { text: 'revise', source: 'interactive' });
   assert.equal(await f.emit('tool_call', { toolName: 'read', input: {} }), undefined);
-  await f.command(`use ${result.details.artifactId}`); await f.tool('request_plan_review');
+  await f.command(''); await f.tool('request_plan_review');
   await f.command('approve'); assert.match(last(f), /互動式確認/);
 }));
